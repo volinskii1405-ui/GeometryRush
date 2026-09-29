@@ -23,6 +23,12 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(raylib)
+# Предупреждения внутри сторонних исходников raylib (например, jar_mod.h) нам не нужны.
+if(MSVC)
+    target_compile_options(raylib PRIVATE /w)
+else()
+    target_compile_options(raylib PRIVATE -w)
+endif()
 
 # ---------------------------------------------------------------- игра
 set(GAME_CORE_SOURCES
