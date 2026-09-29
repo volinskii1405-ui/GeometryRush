@@ -1,5 +1,6 @@
 // Game.h — состояния игры, главный цикл, рендер мира и эффекты.
 #pragma once
+#include "Editor.h"
 #include "Level.h"
 #include "Menu.h"
 #include "Player.h"
@@ -9,7 +10,7 @@
 #include <string>
 #include <vector>
 
-enum class GameState { MainMenu, LevelSelect, IconSelect, Playing, Paused, Victory };
+enum class GameState { MainMenu, LevelSelect, IconSelect, EditorBrowser, Editor, Playing, Paused, Victory };
 
 struct LevelEntry {
     std::string path;
@@ -38,7 +39,10 @@ private:
     void Frame();
     void SetState(GameState s);
     void ScanLevels();
+    void ScanDirectory(const std::string& dir, bool custom);
     bool StartLevel(int index);
+    bool StartTestLevel();
+    std::vector<int> CustomLevelIndices() const;
     void NewAttempt();
 
     // --- игра
@@ -74,6 +78,9 @@ private:
     std::vector<LevelEntry> levels_;
     int       currentLevel_ = -1;
     Level     level_;
+    Editor    editor_;
+    bool      testMode_ = false;      // тест-плей из редактора
+    std::string customDir_;
     Player    player_;
 
     // фиксированный шаг

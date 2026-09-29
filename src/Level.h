@@ -32,6 +32,7 @@ public:
 
     const std::vector<Portal>& Portals() const { return portals_; }
     const std::string& Name() const { return name_; }
+    const std::string& Difficulty() const { return difficulty_; }
     Color BackgroundColor() const { return bgColor_; }
     Color GroundColor() const { return groundColor_; }
 
@@ -44,6 +45,7 @@ private:
     int         cols_ = 0, rows_ = 0;
     float       finishX_ = 0.0f;
     std::string name_ = "Untitled";
+    std::string difficulty_;
     Color       bgColor_     = {40, 70, 160, 255};
     Color       groundColor_ = {30, 50, 130, 255};
 };

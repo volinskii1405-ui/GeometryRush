@@ -38,6 +38,7 @@ add_executable(GeometryRush
     src/Menu.cpp
     src/UI.cpp
     src/Settings.cpp
+    src/Editor.cpp
     ${GAME_CORE_SOURCES}
 )
 target_include_directories(GeometryRush PRIVATE src)

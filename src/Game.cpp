@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 namespace {
 
@@ -55,6 +56,7 @@ Game::Game() {
 
     settingsPath_ = AppPath("settings.txt");
     settings_.Load(settingsPath_);
+    customDir_ = AppPath("mylevels");
     ScanLevels();
 }
 
@@ -77,38 +79,72 @@ void Game::SetState(GameState s) {
     menu_.ResetFocus();
 }
 
+void Game::ScanDirectory(const std::string& dir, bool custom) {
+    FilePathList files = LoadDirectoryFilesEx(dir.c_str(), ".txt", false);
+    std::vector<std::string> paths;
+    for (unsigned i = 0; i < files.count; ++i) paths.push_back(files.paths[i]);
+    UnloadDirectoryFiles(files);
+    std::sort(paths.begin(), paths.end());
+
+    for (const std::string& p : paths) {
+        Level lvl;
+        std::string err;
+        if (!lvl.LoadFromFile(p, &err)) {
+            TraceLog(LOG_WARNING, "Level %s skipped: %s", p.c_str(), err.c_str());
+            continue;
+        }
+        LevelEntry e;
+        e.path = p;
+        e.id = std::string(custom ? "my." : "") + GetFileNameWithoutExt(p.c_str());
+        e.card.name = lvl.Name();
+        e.card.lengthTiles = (int)(lvl.FinishX() / cfg::TILE);
+        e.card.portalCount = (int)lvl.Portals().size();
+        e.card.difficulty = lvl.Difficulty();
+        e.card.custom = custom;
+        levels_.push_back(e);
+    }
+}
+
 void Game::ScanLevels() {
     levels_.clear();
+    // официальные уровни
     const std::string candidates[] = {AppPath("levels"), "levels", "../levels", "../../levels"};
     for (const std::string& dir : candidates) {
         if (!DirectoryExists(dir.c_str())) continue;
-        FilePathList files = LoadDirectoryFilesEx(dir.c_str(), ".txt", false);
-        std::vector<std::string> paths;
-        for (unsigned i = 0; i < files.count; ++i) paths.push_back(files.paths[i]);
-        UnloadDirectoryFiles(files);
-        std::sort(paths.begin(), paths.end());
-
-        for (const std::string& p : paths) {
-            Level lvl;
-            std::string err;
-            if (!lvl.LoadFromFile(p, &err)) {
-                TraceLog(LOG_WARNING, "Level %s skipped: %s", p.c_str(), err.c_str());
-                continue;
-            }
-            LevelEntry e;
-            e.path = p;
-            e.id = GetFileNameWithoutExt(p.c_str());
-            e.card.name = lvl.Name();
-            e.card.lengthTiles = (int)(lvl.FinishX() / cfg::TILE);
-            e.card.portalCount = (int)lvl.Portals().size();
-            levels_.push_back(e);
-        }
+        ScanDirectory(dir, false);
         if (!levels_.empty()) {
             TraceLog(LOG_INFO, "Loaded %d level(s) from %s", (int)levels_.size(), dir.c_str());
-            return;
+            break;
         }
     }
-    TraceLog(LOG_WARNING, "No levels found");
+    // свои уровни из редактора
+    if (DirectoryExists(customDir_.c_str())) ScanDirectory(customDir_, true);
+    if (levels_.empty()) TraceLog(LOG_WARNING, "No levels found");
+}
+
+std::vector<int> Game::CustomLevelIndices() const {
+    std::vector<int> out;
+    for (int i = 0; i < (int)levels_.size(); ++i)
+        if (levels_[i].card.custom) out.push_back(i);
+    return out;
+}
+
+bool Game::StartTestLevel() {
+    std::string err;
+    if (!level_.LoadFromString(editor_.Serialize(), &err)) {
+        editor_.ShowMessage("Level error: " + err);
+        return false;
+    }
+    testMode_ = true;
+    currentLevel_ = -1;
+    attempts_ = 1;
+    jumps_ = 0;
+    playTime_ = 0;
+    particles_.clear();
+    NewAttempt();
+    inputLocked_ = true;
+    SetState(GameState::Playing);
+    return true;
 }
 
 bool Game::StartLevel(int index) {
@@ -119,6 +155,7 @@ bool Game::StartLevel(int index) {
         return false;
     }
     currentLevel_ = index;
+    testMode_ = false;
     attempts_ = 1;
     jumps_ = 0;
     playTime_ = 0;
@@ -162,6 +199,10 @@ void Game::Frame() {
             MenuAction a = menu_.MainMenu(time_, settings_);
             if (a == MenuAction::OpenLevels) SetState(GameState::LevelSelect);
             else if (a == MenuAction::OpenIcons) SetState(GameState::IconSelect);
+            else if (a == MenuAction::OpenEditor) {
+                ScanLevels();
+                SetState(GameState::EditorBrowser);
+            }
             else if (a == MenuAction::Quit) quit_ = true;
             break;
         }
@@ -175,6 +216,40 @@ void Game::Frame() {
             MenuAction a = menu_.LevelSelect(time_, cards, settings_);
             if (a == MenuAction::StartLevel) StartLevel(menu_.SelectedLevel());
             else if (a == MenuAction::Back) SetState(GameState::MainMenu);
+            break;
+        }
+        case GameState::EditorBrowser: {
+            std::vector<int> idx = CustomLevelIndices();
+            std::vector<LevelCard> cards;
+            for (int i : idx) {
+                LevelCard c = levels_[i].card;
+                c.bestPercent = settings_.Best(levels_[i].id);
+                cards.push_back(c);
+            }
+            MenuAction a = menu_.EditorBrowser(time_, cards);
+            int sel = menu_.EditorSelected();
+            bool valid = sel >= 0 && sel < (int)idx.size();
+            if (a == MenuAction::EditorNew) {
+                MakeDirectory(customDir_.c_str());
+                editor_.NewLevel(customDir_);
+                SetState(GameState::Editor);
+            } else if (a == MenuAction::EditorEdit && valid) {
+                if (editor_.Open(levels_[idx[sel]].path)) SetState(GameState::Editor);
+            } else if (a == MenuAction::EditorDelete && valid) {
+                std::remove(levels_[idx[sel]].path.c_str());
+                ScanLevels();
+            } else if (a == MenuAction::Back) {
+                SetState(GameState::MainMenu);
+            }
+            break;
+        }
+        case GameState::Editor: {
+            EditorAction a = editor_.UpdateDraw(dt, time_);
+            if (a == EditorAction::TestPlay) StartTestLevel();
+            else if (a == EditorAction::Back) {
+                ScanLevels();
+                SetState(GameState::EditorBrowser);
+            }
             break;
         }
         case GameState::IconSelect: {
@@ -221,7 +296,7 @@ void Game::Frame() {
 
 void Game::UpdatePlaying(float dt) {
     if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_P)) {
-        SetState(GameState::Paused);
+        SetState(testMode_ ? GameState::Editor : GameState::Paused);   // из теста — сразу в редактор
         return;
     }
     if (IsKeyPressed(KEY_R) && deathTimer_ < 0 && victoryTimer_ < 0) {   // быстрый рестарт
@@ -252,7 +327,7 @@ void Game::UpdatePlaying(float dt) {
         victoryTimer_ -= dt;
         player_.prevPos = player_.pos;                 // игрок уезжает за финиш
         player_.pos.x += cfg::PLAYER_SPEED * dt;
-        if (victoryTimer_ < 0) SetState(GameState::Victory);
+        if (victoryTimer_ < 0) SetState(testMode_ ? GameState::Editor : GameState::Victory);
         return;
     }
 
@@ -307,10 +382,16 @@ void Game::HandleStepEvents(const StepEvents& ev) {
     if (ev.died) OnDeath();
     if (ev.finished) {
         victoryTimer_ = cfg::VICTORY_DELAY;
-        const std::string& id = levels_[currentLevel_].id;
-        victory_.newRecord = settings_.Best(id) < 100;
-        settings_.ReportProgress(id, 100);
-        settings_.Save(settingsPath_);
+        if (testMode_) {
+            char msg[80];
+            std::snprintf(msg, sizeof msg, "Level completed in %d attempt(s)!", attempts_);
+            editor_.ShowMessage(msg, 4.0f);
+        } else {
+            const std::string& id = levels_[currentLevel_].id;
+            victory_.newRecord = settings_.Best(id) < 100;
+            settings_.ReportProgress(id, 100);
+            settings_.Save(settingsPath_);
+        }
         victory_.levelName = level_.Name();
         victory_.attempts = attempts_;
         victory_.jumps = jumps_;
@@ -330,8 +411,8 @@ void Game::OnDeath() {
     flash_ = 1.0f;
 
     int percent = (int)(level_.Progress(player_.pos.x) * 100.0f);
-    const std::string& id = levels_[currentLevel_].id;
-    if (percent > settings_.Best(id)) {
+    const std::string id = testMode_ || currentLevel_ < 0 ? "" : levels_[currentLevel_].id;
+    if (!id.empty() && percent > settings_.Best(id)) {
         settings_.ReportProgress(id, percent);
         settings_.Save(settingsPath_);
     }
@@ -540,10 +621,13 @@ void Game::DrawHud() {
 
     std::snprintf(buf, sizeof buf, "Attempt %d", attempts_);
     ui::Text(buf, 18, 14, 24, WHITE);
-    if (currentLevel_ >= 0) {
+    if (testMode_) {
+        ui::Text("TEST MODE", 18, 42, 20, Color{120, 220, 255, 255});
+    } else if (currentLevel_ >= 0) {
         std::snprintf(buf, sizeof buf, "Best %d%%", settings_.Best(levels_[currentLevel_].id));
         ui::Text(buf, 18, 42, 20, Fade(WHITE, 0.7f));
     }
     ui::Text(level_.Name().c_str(), 18, H - 32, 20, Fade(WHITE, 0.55f));
-    ui::Text("Esc - pause   R - restart", W - 270, H - 32, 20, Fade(WHITE, 0.45f));
+    if (testMode_) ui::Text("Esc - back to editor   R - restart", W - 380, H - 32, 20, Fade(WHITE, 0.6f));
+    else ui::Text("Esc - pause   R - restart", W - 270, H - 32, 20, Fade(WHITE, 0.45f));
 }

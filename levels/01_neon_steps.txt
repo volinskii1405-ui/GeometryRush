@@ -1,6 +1,7 @@
 // Geometry Rush level. Legend: '.' empty, '#' block, '^' spike up, 'v' spike down,
 // C cube, B ball, S ship, G gravity flip, N normal gravity portals, E finish.
 @name Neon Steps
+@difficulty Easy
 @bg 40 90 200
 @ground 30 70 170
 ..........................................................................................................................................................................................................................................................

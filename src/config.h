@@ -31,24 +31,24 @@ constexpr float PLAYER_START_X      = TILE * 2.0f;
 constexpr float INNER_HITBOX_INSET  = 7.0f;    // внутренний хитбокс для боковых ударов
 constexpr float LAND_TOLERANCE      = 6.0f;    // допуск "запрыгивания" на грань блока
 constexpr float SPIKE_HITBOX_INSET  = 4.0f;    // хитбокс игрока для шипов меньше на столько
-constexpr float MAX_FALL_SPEED      = 1500.0f;
+constexpr float MAX_FALL_SPEED      = 1150.0f;
 
 // ---------------------------------------------------------------- куб
-constexpr float CUBE_GRAVITY        = 4950.0f;
-constexpr float CUBE_JUMP_VELOCITY  = 960.0f;  // высота прыжка ~2.3 клетки
-constexpr float CUBE_ROTATION_SPEED = 470.0f;  // град/с в воздухе (~180° за прыжок)
+constexpr float CUBE_GRAVITY        = 3330.0f; // мягкая, "воздушная" гравитация в духе GD
+constexpr float CUBE_JUMP_VELOCITY  = 770.0f;  // высота ~2.2 клетки, полёт ~0.46 с (~4.8 клетки)
+constexpr float CUBE_ROTATION_SPEED = 390.0f;  // град/с в воздухе (~180° за прыжок)
 constexpr float CUBE_SNAP_RATE      = 22.0f;   // скорость доводки угла до 90° на земле
 
 // ---------------------------------------------------------------- шар
-constexpr float BALL_GRAVITY        = 4200.0f;
-constexpr float BALL_FLIP_KICK      = 320.0f;  // стартовая скорость после смены гравитации
-constexpr float BALL_MAX_SPEED      = 1200.0f;
+constexpr float BALL_GRAVITY        = 3000.0f;
+constexpr float BALL_FLIP_KICK      = 260.0f;  // стартовая скорость после смены гравитации
+constexpr float BALL_MAX_SPEED      = 1000.0f;
 constexpr float BALL_ROLL_FACTOR    = 0.85f;   // множитель скорости вращения при качении
 
 // ---------------------------------------------------------------- корабль
-constexpr float SHIP_LIFT           = 2300.0f; // ускорение вверх при удержании
-constexpr float SHIP_GRAVITY        = 2100.0f; // ускорение вниз без удержания
-constexpr float SHIP_MAX_VY         = 560.0f;  // ограничение вертикальной скорости
+constexpr float SHIP_LIFT           = 1750.0f; // ускорение вверх при удержании
+constexpr float SHIP_GRAVITY        = 1550.0f; // ускорение вниз без удержания
+constexpr float SHIP_MAX_VY         = 480.0f;  // ограничение вертикальной скорости
 constexpr float SHIP_TILT_MAX       = 42.0f;   // макс. наклон корпуса, градусы
 constexpr float SHIP_TILT_RATE      = 14.0f;   // сглаживание наклона
 

@@ -42,20 +42,20 @@ MenuAction Menu::MainMenu(float time, const Settings& s) {
     ui::TextShadowCentered("RUSH", W / 2, 70 + ts, ts, icons::Palette(s.primary));
 
     // три текущие иконки
-    float iy = 330;
+    float iy = 325;
     icons::DrawCube(s.cubeIcon, {W / 2 - 150, iy}, 64, sinf(time * 2) * 8, C1(s), C2(s));
     icons::DrawBall(s.ballIcon, {W / 2, iy}, 64, time * 120.0f, C1(s), C2(s));
     icons::DrawShip(s.shipIcon, {W / 2 + 150, iy + sinf(time * 3) * 6}, 56, sinf(time * 3 + 1) * 10, false,
                     C1(s), C2(s), s.cubeIcon);
 
-    const char* labels[] = {"PLAY", "ICONS", "QUIT"};
-    const MenuAction acts[] = {MenuAction::OpenLevels, MenuAction::OpenIcons, MenuAction::Quit};
-    NavigateFocus(&focus_, 3);
+    const char* labels[] = {"PLAY", "EDITOR", "ICONS", "QUIT"};
+    const MenuAction acts[] = {MenuAction::OpenLevels, MenuAction::OpenEditor, MenuAction::OpenIcons, MenuAction::Quit};
+    NavigateFocus(&focus_, 4);
     MenuAction result = MenuAction::None;
-    for (int i = 0; i < 3; ++i) {
-        Rectangle r = {W / 2 - 150, 410.0f + i * 78.0f, 300, 60};
+    for (int i = 0; i < 4; ++i) {
+        Rectangle r = {W / 2 - 150, 396.0f + i * 58.0f, 300, 48};
         if (ui::Hovered(r)) focus_ = i;
-        if (ui::Button(r, labels[i], focus_ == i)) result = acts[i];
+        if (ui::Button(r, labels[i], focus_ == i, 26)) result = acts[i];
     }
     if (ui::AcceptPressed()) result = acts[focus_];
     if (ui::BackPressed()) result = MenuAction::Quit;
@@ -106,6 +106,20 @@ MenuAction Menu::LevelSelect(float time, const std::vector<LevelCard>& levels, c
     icons::DrawBall(s.ballIcon, {card.x + card.width / 2, cy}, 56, time * 90, C1(s), C2(s));
     icons::DrawShip(s.shipIcon, {card.x + card.width / 2 + 110, cy}, 50, sinf(time * 2) * 8, false, C1(s), C2(s), s.cubeIcon);
 
+    {
+        std::string badge = L.custom ? "CUSTOM" : (L.difficulty.empty() ? "" : L.difficulty);
+        if (!badge.empty()) {
+            Color bc = L.custom ? Color{120, 200, 255, 255}
+                     : badge == "Easy" ? Color{90, 230, 110, 255}
+                     : badge == "Normal" ? Color{255, 220, 70, 255}
+                     : badge == "Hard" ? Color{255, 140, 50, 255}
+                     : Color{255, 70, 90, 255};
+            float bw = ui::TextWidth(badge.c_str(), 20) + 24;
+            Rectangle br = {card.x + card.width - bw - 20, card.y + 16, bw, 30};
+            DrawRectangleRounded(br, 0.5f, 8, bc);
+            ui::TextCentered(badge.c_str(), br.x + bw / 2, br.y + 5, 20, Color{20, 20, 30, 255});
+        }
+    }
     std::snprintf(buf, sizeof buf, "Length: %d tiles    Portals: %d", L.lengthTiles, L.portalCount);
     ui::TextCentered(buf, card.x + card.width / 2, card.y + 230, 22, Fade(WHITE, 0.85f));
 
@@ -273,5 +287,56 @@ MenuAction Menu::Victory(float time, const VictoryStats& st, const Settings& s) 
     }
     if (ui::AcceptPressed()) result = acts[focus_];
     if (ui::BackPressed()) result = MenuAction::ToMenu;
+    return result;
+}
+
+// ============================================================ список своих уровней
+MenuAction Menu::EditorBrowser(float time, const std::vector<LevelCard>& levels) {
+    ui::MenuBackground(time, {30, 110, 80, 255});
+    Title("LEVEL EDITOR", 30, 56);
+    int n = (int)levels.size();
+    editorSel_ = n ? std::clamp(editorSel_, 0, n - 1) : 0;
+    deleteArmed_ = std::max(0.0f, deleteArmed_ - GetFrameTime());
+
+    Rectangle panel = {W / 2 - 360, 110, 720, 430};
+    ui::Panel(panel, Fade(BLACK, 0.4f), Fade(WHITE, 0.5f));
+    if (n == 0) {
+        ui::TextCentered("No custom levels yet.", W / 2, panel.y + 170, 30, WHITE);
+        ui::TextCentered("Press NEW to create one!", W / 2, panel.y + 215, 24, Fade(WHITE, 0.7f));
+    }
+    if (ui::KeyPressed(KEY_UP) && n) editorSel_ = (editorSel_ + n - 1) % n;
+    if (ui::KeyPressed(KEY_DOWN) && n) editorSel_ = (editorSel_ + 1) % n;
+
+    const int visible = 7;
+    int first = std::clamp(editorSel_ - visible / 2, 0, std::max(0, n - visible));
+    for (int i = first; i < std::min(n, first + visible); ++i) {
+        Rectangle r = {panel.x + 20, panel.y + 20 + (i - first) * 58.0f, panel.width - 40, 50};
+        bool sel = i == editorSel_, hover = ui::Hovered(r);
+        DrawRectangleRounded(r, 0.3f, 8, sel ? Fade(WHITE, 0.25f) : Fade(WHITE, hover ? 0.12f : 0.05f));
+        if (sel) DrawRectangleRoundedLinesEx(r, 0.3f, 8, 2, WHITE);
+        ui::Text(levels[i].name.c_str(), r.x + 18, r.y + 13, 26, WHITE);
+        char buf[48];
+        std::snprintf(buf, sizeof buf, "%d tiles   best %d%%", levels[i].lengthTiles, levels[i].bestPercent);
+        ui::Text(buf, r.x + r.width - ui::TextWidth(buf, 18) - 18, r.y + 16, 18, Fade(WHITE, 0.6f));
+        if (ui::Clicked(r)) {                     // клик по выбранному — открыть
+            if (sel) return MenuAction::EditorEdit;
+            editorSel_ = i;
+        }
+    }
+
+    MenuAction result = MenuAction::None;
+    float by = H - 150;
+    if (ui::Button({W / 2 - 370, by, 170, 56}, "NEW", false, 26) || ui::KeyPressed(KEY_N)) result = MenuAction::EditorNew;
+    if (n && (ui::Button({W / 2 - 185, by, 170, 56}, "EDIT", false, 26) || ui::AcceptPressed())) result = MenuAction::EditorEdit;
+    if (n) {
+        bool armed = deleteArmed_ > 0;
+        if (ui::Button({W / 2, by, 170, 56}, armed ? "SURE?" : "DELETE", armed, 26, Color{255, 90, 90, 255}) ||
+            ui::KeyPressed(KEY_DELETE)) {
+            if (armed) { result = MenuAction::EditorDelete; deleteArmed_ = 0; }
+            else deleteArmed_ = 2.5f;
+        }
+    }
+    if (ui::Button({W / 2 + 185, by, 170, 56}, "BACK", false, 26) || ui::BackPressed()) result = MenuAction::Back;
+    ui::TextCentered("Levels are saved to the 'mylevels' folder and appear in PLAY", W / 2, H - 70, 20, Fade(WHITE, 0.6f));
     return result;
 }

@@ -63,6 +63,7 @@ bool Level::LoadFromString(const std::string& text, std::string* error) {
     tiles_.clear();
     portals_.clear();
     name_ = "Untitled";
+    difficulty_.clear();
     std::vector<std::string> grid;
 
     std::istringstream in(text);
@@ -76,6 +77,7 @@ bool Level::LoadFromString(const std::string& text, std::string* error) {
             std::string key = t.substr(1, sp == std::string::npos ? std::string::npos : sp - 1);
             std::string val = sp == std::string::npos ? "" : Trim(t.substr(sp));
             if (key == "name") name_ = val;
+            else if (key == "difficulty") difficulty_ = val;
             else if (key == "bg") ParseColor(val, &bgColor_);
             else if (key == "ground") ParseColor(val, &groundColor_);
             continue;
