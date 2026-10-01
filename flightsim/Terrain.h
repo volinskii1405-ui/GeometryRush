@@ -8,7 +8,7 @@
 // треугольникам, что и рисуемая сетка, поэтому колёса стоят точно на картинке.
 class Terrain {
 public:
-    // Аэродром: ВПП 09/27 вдоль оси X, центр в начале координат.
+    // Главный аэродром (см. World.cpp): ВПП 09/27 вдоль оси X, центр в начале координат.
     static constexpr float kAirportElev = 60.0f;   // м над уровнем моря
     static constexpr float kRunwayHalfLen = 1300.0f;
     static constexpr float kRunwayHalfWidth = 22.5f;
@@ -27,16 +27,13 @@ public:
 
     float HalfExtent() const { return -origin_; }
     Vector3 HighestPoint() const;
+    // Густота леса 0..1 (та же, что в раскраске рельефа) — для расстановки деревьев.
+    float ForestAmount(float x, float z) const;
 
-    // Расстояние от точки до ВПП (0 — на полосе).
-    static float DistToRunway(float x, float z)
-    {
-        float dx = fmaxf(fabsf(x) - kRunwayHalfLen, 0.0f), dz = fmaxf(fabsf(z) - kRunwayHalfWidth, 0.0f);
-        return sqrtf(dx * dx + dz * dz);
-    }
+
+    float RawHeight(float x, float z) const;
 
 private:
-    float RawHeight(float x, float z) const;
     float At(int i, int j) const { return h_[(size_t)j * n_ + i]; }
 
     int n_ = 0;            // вершин по стороне

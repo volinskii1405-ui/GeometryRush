@@ -12,7 +12,7 @@ struct Controls;
 class Autopilot {
 public:
     enum class Lat { Hdg, Loc };
-    enum class Vert { TakeOff, Alt, Gs };
+    enum class Vert { TakeOff, Alt, Gs, Vs, GoAround };
 
     // Установка целей при старте сценария.
     void Reset(float hdgDeg, float altFt, float spdKt, bool takeoff, bool armApp);
@@ -22,12 +22,16 @@ public:
     void ToggleAp(const Aircraft& a, float raFt);
     void ToggleAthr(const Aircraft& a);
     void ToggleApp();
+    // TO/GA: уход на второй круг — нос 12.5°, взлётный режим, набор высоты.
+    void Toga(const Aircraft& a);
+    // V/S: снижение/набор с заданной вертикальной скоростью до заданной высоты.
+    void ToggleVs(const Aircraft& a);
     // Отключение автопилота: пилот взялся за штурвал, срабатывание защиты или малая высота.
     void DisconnectAp(const char* reason);
     void DisconnectAthr();
 
     // ---- выбранные значения (задатчики на панели)
-    float hdgBug = 90, altTarget = 3000, spdTarget = 180;
+    float hdgBug = 90, altTarget = 3000, spdTarget = 180, vsTarget = 0;
 
     // ---- состояние
     bool apOn = false, athrOn = false, fdOn = true;
@@ -47,6 +51,6 @@ public:
     Ils ils;
 
 private:
-    bool takeoff_ = false;
+    bool takeoff_ = false, goAround_ = false, vsMode_ = false;
     float prevIas_ = 0, accelKt_ = 0;
 };

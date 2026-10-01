@@ -3,8 +3,9 @@
 class Aircraft;
 class Terrain;
 
-// Сигнализация: GPWS/TAWS (земля), превышение скорости, крен, сваливание.
-enum class Alert { PullUp, Terrain, SinkRate, TooLowGear, BankAngle, Overspeed, Stall, Count };
+// Сигнализация: GPWS/TAWS (земля), превышение скорости, крен, сваливание, отказы систем.
+enum class Alert { PullUp, Terrain, SinkRate, TooLowGear, BankAngle, Overspeed, Stall,
+                   EngFire, EngFail, GearUnsafe, FlapsJam, FuelLow, Count };
 
 class WarningSystem {
 public:

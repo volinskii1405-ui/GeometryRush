@@ -1,5 +1,6 @@
 #include "Autopilot.h"
 #include "Aircraft.h"
+#include "UiText.h"
 
 using namespace fs;
 
@@ -13,6 +14,8 @@ void Autopilot::Reset(float hdgDeg, float altFt, float spdKt, bool takeoff, bool
     locCaptured = gsCaptured = false;
     retard = false;
     takeoff_ = takeoff;
+    goAround_ = vsMode_ = false;
+    vsTarget = 0;
     lat = Lat::Hdg;
     vert = takeoff ? Vert::TakeOff : Vert::Alt;
     apOffTimer = 0;
@@ -45,7 +48,7 @@ void Autopilot::ToggleAp(const Aircraft& a, float raFt)
     // Как в настоящем самолёте: автопилот включается только в воздухе.
     if (a.onGround || raFt < 100.0f || a.crashed) {
         apOffTimer = 2.0f;
-        apOffReason = "AP: NOT BELOW 100 FT";
+        apOffReason = ui::L("AP: NOT BELOW 100 FT", "АВТОПИЛОТ: ТОЛЬКО ВЫШЕ 100 FT");
         return;
     }
     apOn = true;
@@ -73,6 +76,31 @@ void Autopilot::ToggleApp()
     appArmed = true;
 }
 
+void Autopilot::Toga(const Aircraft& a)
+{
+    if (a.crashed || a.onGround) return;
+    goAround_ = true;
+    takeoff_ = false;
+    appArmed = locCaptured = gsCaptured = false;
+    hdgBug = a.HeadingDeg();
+    float altFt = a.pos.y * M_TO_FT;
+    altTarget = fmaxf(ceilf((altFt + 1500.0f) / 500.0f) * 500.0f, 2000.0f);
+    spdTarget = a.Type().approachKt + 30.0f;
+    athrOn = true;
+    retard = false;
+}
+
+void Autopilot::ToggleVs(const Aircraft& a)
+{
+    if (vsMode_) {
+        vsMode_ = false;
+        return;
+    }
+    vsMode_ = true;
+    goAround_ = false;
+    vsTarget = roundf(a.vel.y * MS_TO_FPM / 100.0f) * 100.0f;
+}
+
 void Autopilot::Update(const Aircraft& a, float raFt, Controls& c, float dt)
 {
     ils = ComputeIls(a);
@@ -96,6 +124,8 @@ void Autopilot::Update(const Aircraft& a, float raFt, Controls& c, float dt)
 
     // ------------------------------------------------ режимы
     if (takeoff_ && !a.onGround && raFt > 400.0f) takeoff_ = false;
+    if (goAround_ && altFt > altTarget - 300.0f) goAround_ = false;
+    if (vsMode_ && ((vsTarget >= 0 && altFt >= altTarget - 50.0f) || (vsTarget < 0 && altFt <= altTarget + 50.0f))) vsMode_ = false;
     if ((appArmed || locCaptured) && ils.valid) {
         if (!locCaptured && fabsf(ils.locAngleDeg) < 2.5f && fabsf(WrapDeg180(hdg - ils.courseDeg)) < 70.0f)
             locCaptured = true;
@@ -104,7 +134,8 @@ void Autopilot::Update(const Aircraft& a, float raFt, Controls& c, float dt)
     if (locCaptured && !ils.valid) locCaptured = gsCaptured = false;
     if (locCaptured) appArmed = false;
     lat = locCaptured ? Lat::Loc : Lat::Hdg;
-    vert = gsCaptured ? Vert::Gs : (takeoff_ ? Vert::TakeOff : Vert::Alt);
+    if (gsCaptured) vsMode_ = goAround_ = false;
+    vert = gsCaptured ? Vert::Gs : goAround_ ? Vert::GoAround : takeoff_ ? Vert::TakeOff : vsMode_ ? Vert::Vs : Vert::Alt;
 
     // ------------------------------------------------ команда крена
     float bankCmd = 0;
@@ -121,14 +152,21 @@ void Autopilot::Update(const Aircraft& a, float raFt, Controls& c, float dt)
 
     // ------------------------------------------------ команда тангажа
     float pitchCmd = 0;
+    const AircraftType& ty = a.Type();
+    const float toPitch = ty.jet ? 10.0f : 8.0f;
     if (vert == Vert::TakeOff) {
-        pitchCmd = (a.onGround && iasKt < 105.0f) ? 0.0f : 10.0f;
+        pitchCmd = (a.onGround && iasKt < ty.rotateKt - 5.0f) ? 0.0f : toPitch;
+    } else if (vert == Vert::GoAround) {
+        // Нос 12.5°, но не ценой скорости: ближе к сваливанию — опускаем.
+        float vMin = a.StallSpeedKt() * 1.2f;
+        pitchCmd = 12.5f * Clampf((iasKt - vMin) / 15.0f, 0.2f, 1.0f);
     } else {
         float gammaCmd;
         if (vert == Vert::Gs) {
             gammaCmd = Clampf(-3.0f - ils.gsDevDeg * 2.5f, -6.0f, 0.0f);
         } else {
-            float vsCmd = Clampf((altTarget - altFt) * 4.0f, -2000.0f, 2500.0f);
+            float maxClimb = ty.jet ? 2500.0f : 700.0f;
+            float vsCmd = vert == Vert::Vs ? vsTarget : Clampf((altTarget - altFt) * 4.0f, -2000.0f, maxClimb);
             // Защита скорости: не набирать высоту ценой сваливания.
             float vMin = a.StallSpeedKt() * 1.25f;
             if (vsCmd > 0 && iasKt < vMin + 15.0f) vsCmd *= Clampf((iasKt - vMin) / 15.0f, 0.0f, 1.0f);
@@ -144,9 +182,9 @@ void Autopilot::Update(const Aircraft& a, float raFt, Controls& c, float dt)
     // ------------------------------------------------ автопилот
     if (apOn) {
         if (fabsf(bank) > 45.0f || pitch > 25.0f || pitch < -20.0f) {
-            DisconnectAp("AP OFF: ATTITUDE");
+            DisconnectAp(ui::L("AP OFF: ATTITUDE", "АВТОПИЛОТ ОТКЛЮЧЁН: ПОЛОЖЕНИЕ"));
         } else if (vert == Vert::Gs && raFt < 150.0f) {
-            DisconnectAp("AP OFF: LAND MANUALLY");   // дальше пилот выравнивает сам
+            DisconnectAp(ui::L("AP OFF: LAND MANUALLY", "АВТОПИЛОТ ОТКЛЮЧЁН: САДИТЕСЬ ВРУЧНУЮ"));   // дальше пилот выравнивает сам
         }
     }
     if (apOn) {
@@ -167,8 +205,8 @@ void Autopilot::Update(const Aircraft& a, float raFt, Controls& c, float dt)
         }
         if (retard) {
             c.throttle = MoveTowards(c.throttle, 0.0f, 0.5f * dt);
-        } else if (takeoff_) {
-            c.throttle = MoveTowards(c.throttle, 1.0f, 0.5f * dt);
+        } else if (takeoff_ || goAround_) {
+            c.throttle = MoveTowards(c.throttle, 1.0f, 0.5f * dt);   // взлётный режим (TOGA)
         } else {
             float err = spdTarget - iasKt;
             float rate = Clampf(err * 0.015f - accelKt_ * 0.06f, -0.25f, 0.25f);

@@ -138,6 +138,24 @@ void AudioSystem::Init()
         click_ = MakeSound(b);
     }
 
+    {   // пожарный звонок: частые удары колокола
+        auto b = Buffer(1.0f);
+        for (size_t i = 0; i < b.size(); ++i) {
+            float t = (float)i / RATE;
+            float hit = fmodf(t, 0.07f);
+            float env = expf(-hit * 40.0f);
+            b[i] = 0.45f * env * (sinf(2 * PI * 1250 * t) + 0.5f * sinf(2 * PI * 2710 * t) + 0.3f * sinf(2 * PI * 3900 * t));
+        }
+        alerts_[(int)Alert::EngFire] = MakeSound(b);
+    }
+    {   // одиночный сигнал «master caution»
+        auto b = Buffer(0.8f);
+        for (size_t i = 0; i < b.size(); ++i) {
+            float t = (float)i / RATE;
+            b[i] = 0.4f * expf(-t * 5.0f) * (sinf(2 * PI * 1180 * t) + 0.4f * sinf(2 * PI * 2360 * t));
+        }
+        chime_ = MakeSound(b);
+    }
     {   // отключение автопилота: «кавалерийский горн» (быстрое арпеджио)
         auto b = Buffer(1.6f);
         const float notes[] = {784, 1047, 1319, 1568};
@@ -193,11 +211,13 @@ void AudioSystem::Shutdown()
 {
     if (!ready_) return;
     UnloadAudioStream(engine_);
-    for (Sound& s : alerts_) UnloadSound(s);
+    for (Sound& s : alerts_)
+        if (s.frameCount) UnloadSound(s);
     UnloadSound(crash_);
     UnloadSound(touchdown_);
     UnloadSound(click_);
     UnloadSound(apOff_);
+    UnloadSound(chime_);
     for (Sound& snd : callouts_) UnloadSound(snd);
     CloseAudioDevice();
     ready_ = false;
@@ -205,7 +225,7 @@ void AudioSystem::Shutdown()
 
 void AudioSystem::FillEngine(short* out, int frames, const Aircraft& a, bool paused)
 {
-    float n1Target = a.crashed ? 0.0f : a.n1;
+    float n1Target = a.crashed ? 0.0f : a.N1();
     float windTarget = a.crashed ? 0.0f : fs::Clampf(a.ias / 140.0f, 0.0f, 1.6f);
     float rollTarget = (a.onGround && !a.crashed) ? fs::Clampf(Vector3Length(a.vel) / 45.0f, 0.0f, 1.0f) : 0.0f;
     float master = paused ? 0.0f : 1.0f;
@@ -260,7 +280,14 @@ void AudioSystem::Update(const Aircraft& a, const WarningSystem& w, CalloutSyste
         PlaySound(callouts_[playingCallout_]);
     }
 
-    for (Alert s : {Alert::Overspeed, Alert::Stall}) {
+    // Отказы: звонок при пожаре, одиночный сигнал при появлении нового отказа.
+    for (Alert s : {Alert::EngFail, Alert::GearUnsafe, Alert::FlapsJam, Alert::FuelLow}) {
+        bool on = !paused && w.Active(s);
+        if (on && !prevCaution_[(int)s]) PlaySound(chime_);
+        prevCaution_[(int)s] = on;
+    }
+
+    for (Alert s : {Alert::Overspeed, Alert::Stall, Alert::EngFire}) {
         Sound& snd = alerts_[(int)s];
         if (!paused && w.Active(s)) {
             if (!IsSoundPlaying(snd)) PlaySound(snd);
@@ -273,7 +300,8 @@ void AudioSystem::Update(const Aircraft& a, const WarningSystem& w, CalloutSyste
 void AudioSystem::PlayCrash()
 {
     if (!ready_) return;
-    for (Sound& s : alerts_) StopSound(s);
+    for (Sound& s : alerts_)
+        if (s.frameCount) StopSound(s);
     PlaySound(crash_);
 }
 
@@ -287,6 +315,15 @@ void AudioSystem::PlayTouchdown(float strength)
 void AudioSystem::PlayApDisconnect()
 {
     if (ready_) PlaySound(apOff_);
+}
+
+void AudioSystem::StopAll()
+{
+    if (!ready_) return;
+    for (Sound& s : alerts_)
+        if (s.frameCount) StopSound(s);
+    for (Sound& s : callouts_) StopSound(s);
+    for (bool& b : prevCaution_) b = false;
 }
 
 void AudioSystem::PlayClick()

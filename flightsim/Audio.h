@@ -17,6 +17,7 @@ public:
     void PlayCrash();
     void PlayTouchdown(float strength);
     void PlayClick();
+    void StopAll();
 
 private:
     void FillEngine(short* out, int frames, const Aircraft& a, bool paused);
@@ -24,7 +25,8 @@ private:
     bool ready_ = false;
     AudioStream engine_{};
     Sound alerts_[(int)Alert::Count] = {};
-    Sound crash_{}, touchdown_{}, click_{}, apOff_{};
+    Sound crash_{}, touchdown_{}, click_{}, apOff_{}, chime_{};
+    bool prevCaution_[(int)Alert::Count] = {};
     Sound callouts_[(int)Callout::Count] = {};
     int playingCallout_ = -1;
     Alert lastVoice_ = Alert::Count;

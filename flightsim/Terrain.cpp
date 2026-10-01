@@ -1,4 +1,5 @@
 #include "Terrain.h"
+#include "World.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -90,9 +91,31 @@ float Terrain::RawHeight(float x, float z) const
     r += 0.08f * Fbm(x / 3000.0f, z / 3000.0f, seed_ + 9u, 3);
     h = h * (1.0f - SmoothStep(0.62f, 0.93f, r)) - 260.0f * SmoothStep(0.78f, 1.0f, r);
 
-    // Ровная площадка аэродрома.
+    // Ровная площадка главного аэродрома.
     float w = SmoothStep(250.0f, 2200.0f, DistToRect(x, z, kRunwayHalfLen + 400.0f, 260.0f));
-    return Lerp(kAirportElev, h, w);
+    h = Lerp(kAirportElev, h, w);
+
+    // Остальные аэродромы: полка под полосу и «вырезанная» долина захода (глиссада 4° свободна).
+    for (int i = 0; i < world::AirportCount(); ++i) {
+        const Airport& ap = world::GetAirport(i);
+        if (ap.main) continue;
+        const Runway& rw = ap.rwy;
+        Vector2 l = rw.Local(x, z);
+        for (int end = 0; end < 2; ++end) {
+            float s = end ? -1.0f : 1.0f;              // посадка курсом heading идёт со стороны -x
+            float beyond = -s * l.x - rw.halfLen;     // расстояние перед порогом
+            if (beyond > 0.0f) {
+                float lateral = fabsf(l.y);
+                float corridor = 1.0f - SmoothStep(250.0f + beyond * 0.08f, 700.0f + beyond * 0.15f, lateral);
+                float limit = rw.center.y - 5.0f + beyond * tanf(3.5f * DEG2RAD) + lateral * 0.15f;
+                corridor *= 1.0f - SmoothStep(6000.0f, 8000.0f, beyond);
+                if (h > limit) h = Lerp(h, limit, corridor);
+            }
+        }
+        float wf = SmoothStep(60.0f, 650.0f, rw.Dist(x, z, 120.0f, 70.0f));
+        h = Lerp(rw.center.y, h, wf);
+    }
+    return h;
 }
 
 void Terrain::Generate(unsigned seed)
@@ -117,6 +140,14 @@ float Terrain::GroundHeight(float x, float z) const
     // Та же диагональ, что и в сетке: треугольники (a, c, b) и (b, c, d).
     if (fx + fz <= 1.0f) return a + (b - a) * fx + (c - a) * fz;
     return d + (c - d) * (1.0f - fx) + (b - d) * (1.0f - fz);
+}
+
+float Terrain::ForestAmount(float x, float z) const
+{
+    float h = GroundHeight(x, z);
+    float n1 = Fbm(x / 900.0f, z / 900.0f, seed_ + 51u, 3);
+    float n2 = Fbm(x / 260.0f, z / 260.0f, seed_ + 77u, 2);
+    return fs::SmoothStep(0.05f, 0.35f, n2 + 0.3f * n1) * (1.0f - fs::SmoothStep(700, 1000, h));
 }
 
 Vector3 Terrain::HighestPoint() const
@@ -188,7 +219,9 @@ void Terrain::BuildMeshes(Shader litShader)
                         c = Mix(c, rockDark, fs::SmoothStep(0.35f, 0.6f, slope) * 0.6f);
                         c = Mix(c, snow, fs::SmoothStep(1450, 1650, h + 150 * n1) * (1.0f - fs::SmoothStep(0.45f, 0.7f, slope)));
                     }
-                    if (DistToRect(x, z, kRunwayHalfLen + 400.0f, 260.0f) < 1.0f && fabsf(h - kAirportElev) < 0.01f)
+                    float apDist;
+                    int api = world::NearestAirport(x, z, &apDist);
+                    if (apDist < 300.0f && fabsf(h - world::GetAirport(api).rwy.center.y) < 0.01f)
                         c = Mix(airfield, grassDry, 0.25f + 0.5f * n2);
                     m.colors[v * 4 + 0] = c.r;
                     m.colors[v * 4 + 1] = c.g;

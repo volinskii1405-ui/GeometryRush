@@ -4,8 +4,11 @@
 #include "Warnings.h"
 #include "Ils.h"
 #include "Autopilot.h"
+#include "UiText.h"
 
 #include <cstdio>
+#include <string>
+#include <vector>
 
 using namespace fs;
 
@@ -26,30 +29,10 @@ const Color kCyan{80, 220, 240, 255};
 const Color kRed{240, 40, 40, 255};
 const Color kHudGreen{110, 255, 140, 230};
 
-void Text(const char* s, float x, float y, float size, Color c)
-{
-    DrawText(s, (int)x, (int)y, Fs(size), c);
-}
-
-void TextC(const char* s, float cx, float y, float size, Color c)
-{
-    DrawText(s, (int)(cx - MeasureText(s, Fs(size)) * 0.5f), (int)y, Fs(size), c);
-}
-
-void TextR(const char* s, float rx, float y, float size, Color c)
-{
-    DrawText(s, (int)(rx - MeasureText(s, Fs(size))), (int)y, Fs(size), c);
-}
-
-void TextOutlined(const char* s, float cx, float y, int size, Color c)
-{
-    int w = MeasureText(s, size);
-    int x = (int)(cx - w * 0.5f);
-    for (int dx = -2; dx <= 2; dx += 2)
-        for (int dy = -2; dy <= 2; dy += 2)
-            if (dx || dy) DrawText(s, x + dx, (int)y + dy, size, Color{0, 0, 0, 200});
-    DrawText(s, x, (int)y, size, c);
-}
+void Text(const char* s, float x, float y, float size, Color c) { ui::Draw(s, x, y, size * S, c); }
+void TextC(const char* s, float cx, float y, float size, Color c) { ui::DrawCentered(s, cx, y, size * S, c); }
+void TextR(const char* s, float rx, float y, float size, Color c) { ui::DrawRight(s, rx, y, size * S, c); }
+void TextOutlined(const char* s, float cx, float y, int size, Color c) { ui::DrawOutlined(s, cx, y, (float)size, c); }
 
 Vector2 Rot(Vector2 v, float deg)
 {
@@ -344,25 +327,33 @@ void DrawHeadingTape(const Aircraft& a, float cx, float y, float wdt, float hgt)
 
 // ---------------------------------------------------------------- двигатель и конфигурация
 
-void DrawN1(const Aircraft& a, const Controls& c, float cx, float cy, float r)
+// Стрелочный указатель оборотов одного двигателя.
+void DrawEngineGauge(const Aircraft& a, const Controls& c, int i, float cx, float cy, float r)
 {
+    const AircraftType& t = a.Type();
+    const Engine& e = a.engines[i];
     auto ang = [](float pct) { return 135.0f + 270.0f * Clampf(pct, 0, 110) / 110.0f; };
-    DrawRing({cx, cy}, r - 4 * S, r, ang(0), ang(110), 40, Color{70, 74, 82, 255});
+    Color ring = e.fire ? kRed : Color{70, 74, 82, 255};
+    DrawRing({cx, cy}, r - 4 * S, r, ang(0), ang(110), 40, ring);
     DrawRing({cx, cy}, r - 4 * S, r, ang(100), ang(110), 8, kRed);
-    DrawCircleSector({cx, cy}, r - 5 * S, ang(0), ang(a.n1), 40, Color{230, 230, 230, 60});
+    DrawCircleSector({cx, cy}, r - 5 * S, ang(0), ang(e.n1), 40, Color{230, 230, 230, 60});
     for (int p = 0; p <= 100; p += 20) {
-        float t = ang((float)p) * DEG2RAD;
-        DrawLineEx({cx + cosf(t) * (r - 12 * S), cy + sinf(t) * (r - 12 * S)}, {cx + cosf(t) * r, cy + sinf(t) * r}, 1.5f, WHITE);
+        float tt = ang((float)p) * DEG2RAD;
+        DrawLineEx({cx + cosf(tt) * (r - 10 * S), cy + sinf(tt) * (r - 10 * S)}, {cx + cosf(tt) * r, cy + sinf(tt) * r}, 1.5f, WHITE);
     }
-    float t = ang(a.n1) * DEG2RAD;
-    DrawLineEx({cx, cy}, {cx + cosf(t) * (r - 3 * S), cy + sinf(t) * (r - 3 * S)}, 3.0f * S, WHITE);
-    float tc = ang(22.0f + 78.0f * c.throttle) * DEG2RAD;   // заданный РУДом режим
+    float tt = ang(e.n1) * DEG2RAD;
+    DrawLineEx({cx, cy}, {cx + cosf(tt) * (r - 3 * S), cy + sinf(tt) * (r - 3 * S)}, 3.0f * S, WHITE);
+    float tc = ang(t.idleN1 + (100.0f - t.idleN1) * c.throttle) * DEG2RAD;   // заданный РУДом режим
     DrawCircle((int)(cx + cosf(tc) * (r + 5 * S)), (int)(cy + sinf(tc) * (r + 5 * S)), 3.5f * S, kCyan);
     char buf[16];
-    snprintf(buf, sizeof buf, "%.1f", a.n1);
-    DrawRectangle((int)(cx + 2 * S), (int)(cy + 4 * S), (int)(54 * S), (int)(20 * S), BLACK);
-    TextR(buf, cx + 52 * S, cy + 6 * S, 16, WHITE);
-    TextC("N1 %", cx - 4 * S, cy - r * 0.45f, 12, kCyan);
+    snprintf(buf, sizeof buf, "%.1f", e.n1);
+    DrawRectangle((int)(cx + 2 * S), (int)(cy + 3 * S), (int)(46 * S), (int)(18 * S), BLACK);
+    TextR(buf, cx + 45 * S, cy + 4 * S, 14, WHITE);
+    const char* lbl = t.jet ? (t.engineCount > 1 ? TextFormat("N1 %d", i + 1) : "N1") : "RPM %";
+    TextC(lbl, cx - 2 * S, cy - r * 0.5f, 11, kCyan);
+    if (e.fire) TextC("FIRE", cx, cy + r * 0.55f, 13, kRed);
+    else if (!e.Running() || a.fuel <= 0) TextC(e.shutdown ? "OFF" : "FAIL", cx, cy + r * 0.55f, 13, kAmber);
+    else if (a.reverser > 0.5f) TextC("REV", cx, cy + r * 0.55f, 13, kGreen);
 }
 
 void DrawVBar(float x, float y, float w, float h, float frac, Color c, const char* label, const char* topLbl, const char* botLbl)
@@ -371,70 +362,93 @@ void DrawVBar(float x, float y, float w, float h, float frac, Color c, const cha
     DrawRectangleLinesEx({x, y, w, h}, 1.0f, Color{120, 124, 132, 255});
     float my = y + h * (1.0f - Clampf(frac, 0, 1));
     DrawRectangle((int)(x - 3 * S), (int)(my - 3 * S), (int)(w + 6 * S), (int)(6 * S), c);
-    TextC(label, x + w * 0.5f, y - 15 * S, 12, kCyan);
+    TextC(label, x + w * 0.5f, y - 16 * S, 12, kCyan);
     if (topLbl) Text(topLbl, x + w + 4 * S, y - 2 * S, 10, Color{170, 170, 170, 255});
-    if (botLbl) Text(botLbl, x + w + 4 * S, y + h - 10 * S, 10, Color{170, 170, 170, 255});
+    if (botLbl) Text(botLbl, x + w + 4 * S, y + h - 11 * S, 10, Color{170, 170, 170, 255});
 }
 
 void Annunciator(const char* s, float x, float y, float w, bool on, Color c)
 {
     DrawRectangle((int)x, (int)y, (int)w, (int)(18 * S), on ? Color{(unsigned char)(c.r / 4), (unsigned char)(c.g / 4), (unsigned char)(c.b / 4), 255} : Color{30, 32, 36, 255});
     DrawRectangleLinesEx({x, y, w, 18 * S}, 1.0f, on ? c : Color{60, 62, 68, 255});
-    TextC(s, x + w * 0.5f, y + 4 * S, 11, on ? c : Color{80, 82, 88, 255});
+    TextC(s, x + w * 0.5f, y + 3 * S, 11, on ? c : Color{80, 82, 88, 255});
 }
 
-void DrawSystems(const Aircraft& a, const Controls& c, float x, float y, float h)
+void DrawSystems(const Aircraft& a, const Controls& c, float x, float y)
 {
-    DrawN1(a, c, x + 65 * S, y + 75 * S, 52 * S);
+    const AircraftType& t = a.Type();
+    if (t.engineCount > 1) {
+        DrawEngineGauge(a, c, 0, x + 46 * S, y + 60 * S, 38 * S);
+        DrawEngineGauge(a, c, 1, x + 134 * S, y + 60 * S, 38 * S);
+    } else {
+        DrawEngineGauge(a, c, 0, x + 90 * S, y + 62 * S, 46 * S);
+    }
+    // Топливо: остаток и сколько ещё можно лететь при текущем расходе.
+    {
+        char buf[64];
+        float mins = a.fuelFlow > 1e-4f ? a.fuel / a.fuelFlow / 60.0f : 0.0f;
+        Color fc = a.fuel < t.maxFuel * 0.08f ? kAmber : WHITE;
+        if (a.fuel <= 0) fc = kRed;
+        snprintf(buf, sizeof buf, "FUEL %.0f kg", a.fuel);
+        Text(buf, x + 8 * S, y + 108 * S, 13, fc);
+        if (mins > 0) {
+            snprintf(buf, sizeof buf, "%d:%02d  %.0f kg/h", (int)mins / 60, (int)mins % 60, a.fuelFlow * 3600.0f);
+            Text(buf, x + 8 * S, y + 124 * S, 11, Color{170, 170, 170, 255});
+        }
+    }
 
     // РУД
-    DrawVBar(x + 140 * S, y + 25 * S, 14 * S, 110 * S, c.throttle, WHITE, "THR", "MAX", "IDLE");
+    DrawVBar(x + 190 * S, y + 25 * S, 14 * S, 100 * S, c.throttle, WHITE, "THR", "MAX", "IDLE");
 
     // Закрылки: рычаг (голубой треугольник) и фактическое положение (белая метка)
     {
-        float bx = x + 205 * S, by = y + 25 * S, bh = 110 * S;
+        float bx = x + 248 * S, by = y + 25 * S, bh = 100 * S;
+        const float full = t.flapDeg[3];
         DrawRectangle((int)bx, (int)by, (int)(14 * S), (int)bh, kTape);
-        const char* names[4] = {"UP", "10", "20", "35"};
         for (int i = 0; i < 4; ++i) {
-            float yy = by + bh * ac::FLAP_DEG[i] / 35.0f;
+            float yy = by + bh * t.flapDeg[i] / full;
             DrawLineEx({bx + 14 * S, yy}, {bx + 20 * S, yy}, 1.0f, WHITE);
-            Text(names[i], bx + 22 * S, yy - 5 * S, 10, Color{170, 170, 170, 255});
+            Text(t.flapNames[i], bx + 22 * S, yy - 6 * S, 10, Color{170, 170, 170, 255});
         }
-        float fy = by + bh * a.flaps / 35.0f;
-        DrawRectangle((int)(bx - 3 * S), (int)(fy - 3 * S), (int)(20 * S), (int)(6 * S), WHITE);
-        float ly = by + bh * ac::FLAP_DEG[c.flapsLever] / 35.0f;
+        float fy = by + bh * a.flaps / full;
+        DrawRectangle((int)(bx - 3 * S), (int)(fy - 3 * S), (int)(20 * S), (int)(6 * S), a.Failed(Failure::FlapsJam) ? kAmber : WHITE);
+        float ly = by + bh * t.flapDeg[c.flapsLever] / full;
         DrawTriangle({bx - 4 * S, ly}, {bx - 11 * S, ly - 5 * S}, {bx - 11 * S, ly + 5 * S}, kCyan);
-        TextC("FLAPS", bx + 7 * S, by - 15 * S, 12, kCyan);
+        TextC("FLAPS", bx + 7 * S, by - 16 * S, 12, kCyan);
     }
 
     // Триммер руля высоты
-    DrawVBar(x + 265 * S, y + 25 * S, 12 * S, 110 * S, 0.5f + 0.5f * c.trim, kGreen, "TRIM", "NU", "ND");
+    DrawVBar(x + 308 * S, y + 25 * S, 12 * S, 100 * S, 0.5f + 0.5f * c.trim, kGreen, "TRIM", "NU", "ND");
 
     // Шасси: три лампы
     {
-        float gx = x + 320 * S, gy = y + 25 * S;
-        TextC("GEAR", gx + 32 * S, gy - 15 * S, 12, kCyan);
-        auto lamp = [&](float lx, float ly) {
-            bool down = a.gear >= 0.999f, up = a.gear <= 0.001f;
-            bool disagree = (c.gearDown && !down) || (!c.gearDown && !up);
-            Color col = down ? kGreen : (disagree ? kRed : Color{60, 62, 68, 255});
-            const char* t = down ? "DN" : (up ? "UP" : "");
-            DrawRectangle((int)lx, (int)ly, (int)(26 * S), (int)(20 * S), Color{(unsigned char)(col.r / 4), (unsigned char)(col.g / 4), (unsigned char)(col.b / 4), 255});
-            DrawRectangleLinesEx({lx, ly, 26 * S, 20 * S}, 1.5f, col);
-            TextC(t, lx + 13 * S, ly + 5 * S, 11, col);
-        };
-        lamp(gx + 19 * S, gy);
-        lamp(gx, gy + 26 * S);
-        lamp(gx + 38 * S, gy + 26 * S);
-        Text(c.gearDown ? "LEVER DN" : "LEVER UP", gx + 2 * S, gy + 52 * S, 11, Color{170, 170, 170, 255});
+        float gx = x + 355 * S, gy = y + 25 * S;
+        TextC("GEAR", gx + 32 * S, gy - 16 * S, 12, kCyan);
+        if (!t.retractableGear) {
+            TextC("FIXED", gx + 32 * S, gy + 14 * S, 12, kGreen);
+        } else {
+            auto lamp = [&](float lx, float ly) {
+                bool down = a.gear >= 0.999f, up = a.gear <= 0.001f;
+                bool disagree = (c.gearDown && !down) || (!c.gearDown && !up);
+                Color col = down ? kGreen : (disagree ? kRed : Color{60, 62, 68, 255});
+                const char* txt = down ? "DN" : (up ? "UP" : "");
+                DrawRectangle((int)lx, (int)ly, (int)(26 * S), (int)(20 * S), Color{(unsigned char)(col.r / 4), (unsigned char)(col.g / 4), (unsigned char)(col.b / 4), 255});
+                DrawRectangleLinesEx({lx, ly, 26 * S, 20 * S}, 1.5f, col);
+                TextC(txt, lx + 13 * S, ly + 4 * S, 11, col);
+            };
+            lamp(gx + 19 * S, gy);
+            lamp(gx, gy + 26 * S);
+            lamp(gx + 38 * S, gy + 26 * S);
+            Text(c.gearDown ? "LEVER DN" : "LEVER UP", gx + 2 * S, gy + 52 * S, 11, Color{170, 170, 170, 255});
+        }
     }
 
     // Табло
-    float ax = x + 310 * S, ay = y + 100 * S;
+    float ax = x + 345 * S, ay = y + 100 * S;
     Annunciator("SPD BRK", ax, ay, 84 * S, a.speedbrake > 0.02f, kAmber);
     Annunciator("PARK BRK", ax, ay + 22 * S, 84 * S, c.parkingBrake, kAmber);
-    Annunciator("BRAKES", ax, ay + 44 * S, 84 * S, c.brakes > 0.05f && !c.parkingBrake, kGreen);
-    (void)h;
+    Annunciator(a.reverser > 0.05f ? "REVERSE" : "BRAKES", ax, ay + 44 * S, 84 * S,
+                a.reverser > 0.05f || (c.brakes > 0.05f && !c.parkingBrake), kGreen);
 
     // Положение штурвала и педалей
     float sx = x + 20 * S, sy = y + 150 * S, ss = 80 * S;
@@ -442,8 +456,9 @@ void DrawSystems(const Aircraft& a, const Controls& c, float x, float y, float h
     DrawLineEx({sx + ss / 2, sy}, {sx + ss / 2, sy + ss}, 1.0f, Color{90, 94, 102, 255});
     DrawLineEx({sx, sy + ss / 2}, {sx + ss, sy + ss / 2}, 1.0f, Color{90, 94, 102, 255});
     DrawCircle((int)(sx + ss / 2 + c.roll * ss / 2), (int)(sy + ss / 2 + c.pitch * ss / 2), 5 * S, kCyan);
-    DrawCircleLines((int)(sx + ss / 2 + a.aileron / ac::MAX_AILERON * ss / 2), (int)(sy + ss / 2 + a.elevator / ac::MAX_ELEVATOR * ss / 2), 8 * S, WHITE);
-    Text("STICK", sx, sy - 14 * S, 11, kCyan);
+    DrawCircleLines((int)(sx + ss / 2 + a.aileron / (t.maxAilDeg * DEG2RAD) * ss / 2),
+                    (int)(sy + ss / 2 + a.elevator / (t.maxElevDeg * DEG2RAD) * ss / 2), 8 * S, WHITE);
+    Text("STICK", sx, sy - 15 * S, 11, kCyan);
     DrawRectangle((int)sx, (int)(sy + ss + 8 * S), (int)ss, (int)(10 * S), kTape);
     DrawRectangle((int)(sx + ss / 2 + c.yaw * ss / 2 - 3 * S), (int)(sy + ss + 6 * S), (int)(6 * S), (int)(14 * S), kCyan);
     Text("RUDDER", sx, sy + ss + 21 * S, 10, Color{170, 170, 170, 255});
@@ -456,19 +471,56 @@ void DrawData(const Aircraft& a, const WarningSystem& w, float x, float y)
     float aoa = a.alpha * RAD2DEG;
     Color aoaC = aoa > a.stallAlpha * RAD2DEG - 2.0f ? kRed : (aoa > a.stallAlpha * RAD2DEG - 5.0f ? kAmber : WHITE);
     snprintf(buf, sizeof buf, "AOA  %5.1f", aoa);
-    Text(buf, x, y, 14, aoaC);
+    Text(buf, x, y, 13, aoaC);
     snprintf(buf, sizeof buf, "G    %5.2f", a.gLoad);
-    Text(buf, x, y + 18 * S, 14, (a.gLoad > 3.5f || a.gLoad < -1.0f) ? kAmber : WHITE);
+    Text(buf, x, y + 18 * S, 13, (a.gLoad > 3.5f || a.gLoad < -1.0f) ? kAmber : WHITE);
     snprintf(buf, sizeof buf, "TAS  %5.0f", a.tas * MS_TO_KT);
-    Text(buf, x, y + 36 * S, 14, WHITE);
+    Text(buf, x, y + 36 * S, 13, WHITE);
     snprintf(buf, sizeof buf, "GS   %5.0f", gs);
-    Text(buf, x, y + 54 * S, 14, WHITE);
+    Text(buf, x, y + 54 * S, 13, WHITE);
     snprintf(buf, sizeof buf, "VS   %5.0f", a.vel.y * MS_TO_FPM);
-    Text(buf, x, y + 72 * S, 14, WHITE);
+    Text(buf, x, y + 72 * S, 13, WHITE);
     if (w.timeToImpact > 0) {
         snprintf(buf, sizeof buf, "TERR %4.0fs", w.timeToImpact);
-        Text(buf, x, y + 90 * S, 14, kAmber);
+        Text(buf, x, y + 90 * S, 13, kAmber);
     }
+}
+
+// Сообщения об отказах с подсказкой, что делать (как экран ECAM).
+void DrawEcam(const Aircraft& a, float x, float y, float w)
+{
+    using ui::L;
+    const AircraftType& t = a.Type();
+    struct Msg { std::string title, action; Color c; };
+    std::vector<Msg> msgs;
+    for (int i = 0; i < t.engineCount; ++i) {
+        const Engine& e = a.engines[i];
+        std::string eng = t.engineCount > 1 ? TextFormat("ENG %d", i + 1) : "ENGINE";
+        if (e.fire)
+            msgs.push_back({eng + " FIRE", L("J - fire handle: shut down + extinguish", "J — пожарный кран: выключить и потушить"), kRed});
+        else if (e.shutdown)
+            msgs.push_back({eng + " SHUT DOWN", L("Fly on the other engine, land ASAP", "Летите на втором двигателе, садитесь"), kAmber});
+        else if (e.failed)
+            msgs.push_back({eng + " FAIL", t.engineCount > 1 ? L("Hold heading with rudder (Q/E)", "Держите курс педалями (Q/E)")
+                                                            : L("Glide: ~1.3 x stall speed, pick a field", "Планируйте на ~1.3 скорости сваливания"), kAmber});
+    }
+    if (a.fuel <= 0)
+        msgs.push_back({"FUEL EMPTY", L("Engines out - glide to a runway", "Двигатели встали — планируйте к полосе"), kRed});
+    else if (a.fuel < t.maxFuel * 0.08f)
+        msgs.push_back({"FUEL LOW", L("Land at the nearest airport", "Садитесь на ближайший аэродром"), kAmber});
+    if (a.Failed(Failure::FuelLeak) && a.fuel > 0)
+        msgs.push_back({"FUEL LEAK", L("Fuel is draining fast", "Топливо быстро уходит"), kAmber});
+    if (a.Failed(Failure::GearHydraulics) && a.gear < 0.999f)
+        msgs.push_back({"GEAR UNSAFE", L("H - alternate gear extension (gravity)", "H — аварийный выпуск шасси (под весом)"), kAmber});
+    if (a.Failed(Failure::FlapsJam))
+        msgs.push_back({"FLAPS JAMMED", L("Fly the approach ~20 kt faster", "Заход на скорости на ~20 kt выше"), kAmber});
+    if (a.tailStrike) msgs.push_back({"TAIL STRIKE", L("Lower pitch on rotation/flare", "Меньше тангаж при отрыве и выравнивании"), kAmber});
+    for (const Msg& m : msgs) {
+        Text(m.title.c_str(), x, y, 15, m.c);
+        Text(m.action.c_str(), x + 6 * S, y + 18 * S, 11, Color{200, 204, 210, 255});
+        y += 40 * S;
+    }
+    (void)w;
 }
 
 // ---------------------------------------------------------------- HUD в кабине (проекция на стекло)
@@ -505,8 +557,8 @@ void DrawCockpitHud(const Aircraft& a, const Camera3D& cam)
             if (p != 0) {
                 char buf[8];
                 snprintf(buf, sizeof buf, "%d", p);
-                DrawText(buf, (int)b1.x + 6, (int)b1.y - 8, 16, kHudGreen);
-                DrawText(buf, (int)a0.x - 26, (int)a0.y - 8, 16, kHudGreen);
+                ui::Draw(buf, b1.x + 6, b1.y - 9, 16, kHudGreen);
+                ui::Draw(buf, a0.x - 28, a0.y - 9, 16, kHudGreen);
             }
         }
     }
@@ -551,13 +603,13 @@ void DrawAlerts(const WarningSystem& w, float time)
     float bx = sw * 0.5f - 170 * S, by = 22 * S;
     bool on = Blink(time, 2.5f);
     DrawRectangle((int)bx, (int)by, (int)(160 * S), (int)(34 * S), warn && on ? Color{200, 20, 20, 255} : Color{50, 20, 20, 200});
-    TextC("MASTER WARNING", bx + 80 * S, by + 11 * S, 13, warn ? WHITE : Color{120, 70, 70, 255});
+    TextC("MASTER WARNING", bx + 80 * S, by + 10 * S, 12, warn ? WHITE : Color{120, 70, 70, 255});
     DrawRectangle((int)(bx + 180 * S), (int)by, (int)(160 * S), (int)(34 * S), caut && on ? Color{220, 150, 0, 255} : Color{50, 40, 10, 200});
-    TextC("MASTER CAUTION", bx + 260 * S, by + 11 * S, 13, caut ? BLACK : Color{120, 100, 50, 255});
+    TextC("MASTER CAUTION", bx + 260 * S, by + 10 * S, 12, caut ? BLACK : Color{120, 100, 50, 255});
 
     // Активные сигналы по приоритету
-    const Alert order[] = {Alert::PullUp, Alert::Overspeed, Alert::Stall, Alert::Terrain,
-                           Alert::SinkRate, Alert::TooLowGear, Alert::BankAngle};
+    const Alert order[] = {Alert::PullUp, Alert::EngFire, Alert::Overspeed, Alert::Stall, Alert::Terrain, Alert::SinkRate,
+                           Alert::TooLowGear, Alert::BankAngle, Alert::EngFail, Alert::GearUnsafe, Alert::FuelLow, Alert::FlapsJam};
     float y = 92 * S;
     bool first = true;
     for (Alert a : order) {
@@ -565,26 +617,24 @@ void DrawAlerts(const WarningSystem& w, float time)
         if (a == Alert::Terrain && w.Active(Alert::PullUp)) continue;
         bool red = WarningSystem::IsWarning(a);
         Color c = red ? kRed : kAmber;
-        int size = Fs(first ? 52 : 30);
+        int size = Fs(first ? 46 : 26);
         if (!first || on || !red) TextOutlined(WarningSystem::Text(a), sw * 0.5f, y, size, c);
         y += size + 8 * S;
         first = false;
     }
 }
 
-void Overlay(const char* title, Color tc, const char* const* lines, int n)
+void Overlay(const char* title, Color tc, const std::vector<std::string>& lines)
 {
     const int sw = GetScreenWidth(), sh = GetScreenHeight();
     DrawRectangle(0, 0, sw, sh, Color{0, 0, 0, 150});
-    float w = 760 * S, h = (110 + n * 24) * S;
+    float w = 900 * S, h = (100 + lines.size() * 24) * S;
     float x = (sw - w) * 0.5f, y = (sh - h) * 0.42f;
     DrawRectangle((int)x, (int)y, (int)w, (int)h, Color{18, 20, 26, 240});
     DrawRectangleLinesEx({x, y, w, h}, 2.0f, tc);
-    TextC(title, sw * 0.5f, y + 20 * S, 40, tc);
-    for (int i = 0; i < n; ++i) Text(lines[i], x + 30 * S, y + (80 + i * 24) * S, 18, Color{220, 224, 230, 255});
+    TextC(title, sw * 0.5f, y + 18 * S, 34, tc);
+    for (size_t i = 0; i < lines.size(); ++i) Text(lines[i].c_str(), x + 30 * S, y + (74 + i * 24) * S, 16, Color{220, 224, 230, 255});
 }
-
-} // namespace
 
 // Строка режимов автопилота (FMA): зелёным — активные режимы, голубым — взведённые.
 void DrawFma(float x, float y)
@@ -596,17 +646,24 @@ void DrawFma(float x, float y)
     auto box = [&](const char* main, Color mc, const char* armed, float w) {
         DrawRectangle((int)cx, (int)y, (int)w, (int)h, Color{0, 0, 0, 190});
         DrawRectangleLinesEx({cx, y, w, h}, 1.0f, Color{70, 74, 82, 255});
-        Text(main, cx + 6 * S, y + 5 * S, 13, mc);
-        if (armed) TextR(armed, cx + w - 6 * S, y + 5 * S, 12, kCyan);
+        Text(main, cx + 6 * S, y + 4 * S, 13, mc);
+        if (armed) TextR(armed, cx + w - 6 * S, y + 4 * S, 12, kCyan);
         cx += w + 3 * S;
     };
-    const char* thr = ap.athrOn ? (ap.retard ? "RETARD" : "SPEED") : "MAN THR";
+    const char* thr = ap.athrOn ? (ap.retard ? "RETARD" : (ap.vert == Autopilot::Vert::GoAround || ap.vert == Autopilot::Vert::TakeOff ? "TOGA" : "SPEED")) : "MAN THR";
     box(TextFormat("A/THR %s", thr), ap.athrOn ? kGreen : Color{150, 150, 150, 255}, nullptr, 150 * S);
     const char* latArmed = (ap.appArmed && !ap.locCaptured) ? "LOC" : nullptr;
     box(ap.lat == Autopilot::Lat::Loc ? "LOC" : TextFormat("HDG %03d", (int)ap.hdgBug % 360), kGreen, latArmed, 110 * S);
     const char* vertArmed = ((ap.appArmed || ap.locCaptured) && !ap.gsCaptured) ? "G/S" : nullptr;
-    const char* vert = ap.vert == Autopilot::Vert::Gs ? "G/S" : (ap.vert == Autopilot::Vert::TakeOff ? "TO" : TextFormat("ALT %d", (int)ap.altTarget));
-    box(vert, kGreen, vertArmed, 120 * S);
+    const char* vert = "";
+    switch (ap.vert) {
+    case Autopilot::Vert::Gs: vert = "G/S"; break;
+    case Autopilot::Vert::TakeOff: vert = "TO"; break;
+    case Autopilot::Vert::GoAround: vert = "GA"; break;
+    case Autopilot::Vert::Vs: vert = TextFormat("V/S %+d", (int)ap.vsTarget); break;
+    default: vert = TextFormat("ALT %d", (int)ap.altTarget); break;
+    }
+    box(vert, kGreen, vertArmed, 130 * S);
     box(ap.apOn ? "AP" : "AP OFF", ap.apOn ? kGreen : Color{150, 150, 150, 255}, ap.fdOn ? "FD" : nullptr, 90 * S);
 }
 
@@ -614,20 +671,58 @@ void DrawApAndCallouts(const CalloutSystem* callouts, float time)
 {
     const int sw = GetScreenWidth(), sh = GetScreenHeight();
     if (g_ap && g_ap->apOffTimer > 0.0f && Blink(time, 3.0f)) {
-        const char* msg = g_ap->apOffReason[0] ? g_ap->apOffReason : "AP OFF";
-        TextOutlined(msg, sw * 0.5f, 62 * S, Fs(22), kRed);
+        const char* msg = g_ap->apOffReason[0] ? g_ap->apOffReason : ui::L("AP OFF", "АВТОПИЛОТ ОТКЛЮЧЁН");
+        TextOutlined(msg, sw * 0.5f, 62 * S, Fs(20), kRed);
     }
     if (callouts && callouts->showTimer > 0.0f && callouts->shown != Callout::Count) {
         Color c = callouts->shown == Callout::Retard ? kAmber : WHITE;
         unsigned char alpha = (unsigned char)(255 * Clampf(callouts->showTimer / 0.4f, 0, 1));
         c.a = alpha;
-        TextOutlined(CalloutSystem::Text(callouts->shown), sw * 0.5f, sh * 0.42f, Fs(40), c);
+        TextOutlined(CalloutSystem::Text(callouts->shown), sw * 0.5f, sh * 0.40f, Fs(38), c);
     }
 }
+
+void DrawMissionPanel(const HudInfo& info)
+{
+    if (!info.missionTitle) return;
+    float x = 14 * S, y = 14 * S, w = 430 * S;
+    float h = (34 + 20 * info.missionLines.size()) * S;
+    DrawRectangle((int)x, (int)y, (int)w, (int)h, Color{0, 0, 0, 150});
+    DrawRectangleLinesEx({x, y, w, h}, 1.0f, Color{90, 160, 220, 200});
+    Text(info.missionTitle, x + 10 * S, y + 7 * S, 16, Color{140, 200, 255, 255});
+    for (size_t i = 0; i < info.missionLines.size(); ++i)
+        Text(info.missionLines[i].c_str(), x + 10 * S, y + (30 + 20 * i) * S, 13, WHITE);
+}
+
+std::vector<std::string> HelpLines(const Aircraft& a)
+{
+    using ui::L;
+    const AircraftType& t = a.Type();
+    std::vector<std::string> v = {
+        L("Stick: W/S or Up/Down - push/pull,  A/D or Left/Right - roll", "Штурвал: W/S или ↑/↓ — от себя/на себя,  A/D или ←/→ — крен"),
+        L("Rudder & nose wheel: Q / E        Mouse yoke: M (mouse = stick)", "Педали и носовое колесо: Q / E      Штурвал-мышь: M"),
+        L("Throttle: Shift / Ctrl (hold), Z - idle, X - full / TO-GA", "РУД: Shift / Ctrl (держать), Z — малый газ, X — взлётный / уход TO/GA"),
+        L("Reverse: hold Ctrl at idle after touchdown", "Реверс: держать Ctrl на малом газе после касания"),
+        L("Trim: [ / ] or Home / End      Flaps: F extend, V retract", "Триммер: [ / ] или Home / End      Закрылки: F выпустить, V убрать"),
+        L("Gear: G   Alternate gear: H   Brakes: Space/B   Parking brake: P", "Шасси: G   Аварийный выпуск: H   Тормоза: Space/B   Стояночный: P"),
+        L("Speed brake: / or K   Fire handle: J   Camera: C (mouse to look)", "Интерцепторы: / или K   Пожарный кран: J   Камера: C (мышь — обзор)"),
+        L("Autopilot: T - AP, Y - auto throttle, L - ILS, U - V/S, O - FD", "Автопилот: T — AP, Y — автомат тяги, L — ILS, U — V/S, O — директор"),
+        L("Targets: 9/0 heading, -/= altitude, ,/. speed, ;/' vertical speed", "Задатчики: 9/0 курс, -/= высота, ,/. скорость, ;/' вертикальная"),
+        L("Wind: F8   Pause/menu: Esc   Restart: R", "Ветер: F8   Пауза/меню: Esc   Заново: R"),
+        "",
+    };
+    v.push_back(TextFormat(L("%s: rotate ~%d kt, approach ~%d kt with full flaps, Vmo %d kt",
+                             "%s: отрыв ~%d kt, заход ~%d kt с полными закрылками, Vmo %d kt"),
+                           ui::ru ? t.nameRu : t.nameEn, (int)t.rotateKt, (int)t.approachKt, (int)t.vmo));
+    return v;
+}
+
+} // namespace
 
 void DrawHud(const Aircraft& a, const Controls& c, const WarningSystem& w, const Terrain& t,
              const Camera3D& cam, const HudInfo& info)
 {
+    using ui::L;
     const int sw = GetScreenWidth(), sh = GetScreenHeight();
     S = fminf(sh / 900.0f, sw / 1500.0f);
     g_ap = info.ap;
@@ -666,66 +761,39 @@ void DrawHud(const Aircraft& a, const Controls& c, const WarningSystem& w, const
     DrawHeadingTape(a, attCx, cy + A * 0.5f + 28 * S, A, 24 * S);
     DrawFma(px, panelTop - 28 * S);
 
-    // Двигатель, механизация, шасси
-    float sysX = attCx + A * 0.5f + 140 * S;
-    DrawSystems(a, c, sysX, panelTop + 18 * S, panelH);
+    // Двигатели, механизация, шасси
+    float sysX = attCx + A * 0.5f + 135 * S;
+    DrawSystems(a, c, sysX, panelTop + 18 * S);
     DrawData(a, w, sysX + 120 * S, panelTop + 160 * S);
 
-    // Справочная колонка
-    float ix = sysX + 440 * S;
-    if (ix + 200 * S < sw) {
-        char buf[96];
-        Text(info.scenarioName, ix, panelTop + 20 * S, 16, WHITE);
-        snprintf(buf, sizeof buf, "VIEW  %s  (C)", CamModeName(info.cam));
-        Text(buf, ix, panelTop + 46 * S, 14, Color{190, 194, 200, 255});
-        snprintf(buf, sizeof buf, "INPUT %s", info.gamepad ? "GAMEPAD" : (info.mouseYoke ? "MOUSE YOKE (M)" : "KEYBOARD (M - mouse)"));
-        Text(buf, ix, panelTop + 66 * S, 14, Color{190, 194, 200, 255});
-        snprintf(buf, sizeof buf, "WIND  %s  (F8)", info.windName);
-        Text(buf, ix, panelTop + 86 * S, 14, Color{190, 194, 200, 255});
-        snprintf(buf, sizeof buf, "VMO %d  VFE %d  VLE %d", (int)ac::VMO_KT, (int)a.SpeedLimitKt(), (int)ac::VLE_KT);
-        Text(buf, ix, panelTop + 112 * S, 13, Color{150, 154, 160, 255});
-        snprintf(buf, sizeof buf, "VS %d kt (stall, current flaps)", (int)a.StallSpeedKt());
-        Text(buf, ix, panelTop + 130 * S, 13, Color{150, 154, 160, 255});
-        Text("T - autopilot   Y - auto thr   L - ILS   F1 - help", ix, panelTop + panelH - 30 * S, 13, Color{150, 154, 160, 255});
-        if (a.tailStrike) Text("TAIL STRIKE!", ix, panelTop + 156 * S, 18, kAmber);
+    // Справочная колонка и сообщения об отказах
+    float ix = sysX + 455 * S;
+    if (ix + 220 * S < sw) {
+        char buf[128];
+        snprintf(buf, sizeof buf, "%s · %s (C)", ui::ru ? a.Type().nameRu : a.Type().nameEn, CamModeName(info.cam));
+        Text(buf, ix, panelTop + 14 * S, 14, WHITE);
+        snprintf(buf, sizeof buf, L("Wind %s (F8)   %s", "Ветер %s (F8)   %s"), info.windName,
+                 info.gamepad ? L("gamepad", "геймпад") : (info.mouseYoke ? L("mouse yoke", "штурвал-мышь") : L("keyboard", "клавиатура")));
+        Text(buf, ix, panelTop + 34 * S, 12, Color{180, 184, 190, 255});
+        snprintf(buf, sizeof buf, "VS %d   VLIM %d kt", (int)a.StallSpeedKt(), (int)a.SpeedLimitKt());
+        Text(buf, ix, panelTop + 52 * S, 12, Color{150, 154, 160, 255});
+        DrawEcam(a, ix, panelTop + 78 * S, sw - ix - 14 * S);
+        Text(L("F1 - help   T - autopilot   Esc - menu", "F1 — справка   T — автопилот   Esc — меню"), ix, panelTop + panelH - 26 * S, 12,
+             Color{150, 154, 160, 255});
     }
 
     if (info.touchdownMsgTimer > 0) {
-        char buf[128];
+        char buf[160];
         float fpm = -info.lastTouchdownFpm;
-        const char* rating = fpm < 120 ? "BUTTER" : fpm < 300 ? "SMOOTH" : fpm < 600 ? "FIRM" : "HARD";
-        snprintf(buf, sizeof buf, "TOUCHDOWN %.0f fpm - %s   centerline %.1f m", -fpm, rating, info.touchdownCenterline);
-        TextOutlined(buf, sw * 0.5f, panelTop - 62 * S, Fs(24), fpm < 600 ? kGreen : kAmber);
+        const char* rating = fpm < 120 ? L("BUTTER", "ИДЕАЛЬНО") : fpm < 300 ? L("SMOOTH", "МЯГКО") : fpm < 600 ? L("FIRM", "ЖЁСТКО") : L("HARD", "ГРУБО");
+        snprintf(buf, sizeof buf, L("TOUCHDOWN %.0f fpm - %s   centerline %.1f m", "КАСАНИЕ %.0f fpm — %s   от оси %.1f м"), -fpm, rating,
+                 info.touchdownCenterline);
+        TextOutlined(buf, sw * 0.5f, panelTop - 64 * S, Fs(22), fpm < 600 ? kGreen : kAmber);
     }
 
+    DrawMissionPanel(info);
     DrawAlerts(w, info.time);
     DrawApAndCallouts(info.callouts, info.time);
 
-    if (a.crashed) {
-        const char* lines[] = {a.crashReason.c_str(), "", "R - try again", "1 - runway   2 - ILS approach   3 - mountains"};
-        Overlay("CRASH", kRed, lines, 4);
-    } else if (info.showHelp) {
-        const char* lines[] = {
-            "Stick:  W/S or Up/Down - push/pull     A/D or Left/Right - roll",
-            "Rudder & nose wheel:  Q / E            Mouse yoke: M (mouse = stick)",
-            "Throttle:  Shift / Ctrl (hold),  Z - idle,  X - TO/GA (max)",
-            "Trim:  [ / ]  or  Home / End           Flaps:  F extend, V retract",
-            "Gear:  G     Brakes:  Space or B (hold)   Parking brake:  P",
-            "Speed brake:  /  or  K                  Camera:  C,  mouse to look",
-            "Wind:  F8     Pause:  Esc     Restart:  R     Scenarios:  1 2 3",
-            "",
-            "Autopilot:  T - AP on/off   Y - auto throttle   L - ILS approach   O - FD",
-            "Set:  9 / 0 - heading   - / = - altitude   , / . - speed",
-            "Magenta cross on PFD = Flight Director: put the yellow wings on it.",
-            "Stick/trim input disconnects AP. On ILS it drops off at 150 ft - flare yourself.",
-            "",
-            "Takeoff: P (park brake off), flaps 10, X (full power), rotate at ~110 kt,",
-            "positive climb - gear up, flaps up above 150 kt. Final: flaps 35, gear down, ~120 kt.",
-        };
-        Overlay("CONTROLS", kCyan, lines, 15);
-    } else if (info.paused) {
-        const char* lines[] = {"Esc - continue", "1 - takeoff from runway 09", "2 - ILS approach runway 09 (10 nm final)",
-                               "3 - low level through the mountains", "F1 - controls", "Q (while paused) - quit"};
-        Overlay("PAUSED", WHITE, lines, 6);
-    }
+    if (info.showHelp && !a.crashed) Overlay(L("CONTROLS", "УПРАВЛЕНИЕ"), kCyan, HelpLines(a));
 }

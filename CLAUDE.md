@@ -21,7 +21,7 @@
 
 2. **Всегда присылай сами архивы** через SendUserFile:
    * `GeometryRush-src.tar.gz` — исходники (`git archive --prefix=GeometryRush/ HEAD`);
-   * `GeometryRush-linux-x86_64.tar.gz` — готовые бинарники `FlightSim`, `GeometryRush` и папка `levels/`.
+   * `GeometryRush-linux-x86_64.tar.gz` — готовые бинарники `FlightSim`, `GeometryRush` и папки `levels/`, `sounds/`, `fonts/`.
      Собирать в отдельной папке `build-dist` с
      `-DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"`, чтобы бинарники не зависели
      от версии libstdc++ на Fedora. Проверить `objdump -T ... | grep GLIBC_` — указать минимальную glibc.

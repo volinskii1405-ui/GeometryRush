@@ -1,5 +1,5 @@
 #pragma once
-#include "FlightMath.h"
+#include "AircraftType.h"
 
 #include <string>
 
@@ -12,41 +12,40 @@ struct Controls {
     float yaw = 0;       // педали: +1 — правая
     float throttle = 0;  // РУД 0..1
     float trim = 0;      // триммер руля высоты -1..1 (+ — на кабрирование)
-    int flapsLever = 0;  // 0..3: UP / 10 / 20 / 35
+    int flapsLever = 0;  // 0..3
     bool gearDown = true;
     float brakes = 0;    // тормоза колёс 0..1
     bool parkingBrake = false;
     bool speedbrake = false;
+    bool reverse = false;      // реверс тяги (только на земле)
+    bool altGear = false;      // аварийный выпуск шасси (под собственным весом)
+    bool fireHandle[2] = {false, false};   // пожарный кран: выключить двигатель и разрядить огнетушитель
 };
 
-// Лёгкий двухдвигательный реактивный самолёт (масштаб бизнес-джета).
-namespace ac {
-constexpr float MASS = 7600.0f;            // кг
-constexpr float WING_AREA = 30.0f;         // м²
-constexpr float SPAN = 15.9f;              // м
-constexpr float CHORD = 2.0f;              // м, средняя аэродинамическая хорда
-constexpr float THRUST_MAX = 26000.0f;     // Н, оба двигателя на уровне моря
-constexpr float IXX = 38000.0f;            // крен
-constexpr float IYY = 100000.0f;            // рыскание
-constexpr float IZZ = 74000.0f;            // тангаж
+enum class Failure { Engine1, Engine2, Fire1, Fire2, GearHydraulics, FlapsJam, FuelLeak, Count };
 
-constexpr float VMO_KT = 260.0f;           // макс. эксплуатационная приборная скорость
-constexpr float VLE_KT = 200.0f;           // с выпущенным шасси
-constexpr float FLAP_DEG[4] = {0.0f, 10.0f, 20.0f, 35.0f};
-constexpr float VFE_KT[4] = {VMO_KT, 200.0f, 180.0f, 160.0f};
-
-constexpr float MAX_ELEVATOR = 25.0f * DEG2RAD;
-constexpr float MAX_AILERON = 20.0f * DEG2RAD;
-constexpr float MAX_RUDDER = 25.0f * DEG2RAD;
-constexpr float GEAR_TIME = 6.0f;          // с, полный цикл выпуска/уборки
-} // namespace ac
+struct Engine {
+    float n1 = 0;          // обороты, % (у винта — мощность)
+    float thrust = 0;      // Н (отрицательная — реверс)
+    bool failed = false;   // отказ: двигатель остановился
+    bool fire = false;     // пожар
+    bool shutdown = false; // выключен пожарным краном
+    float fireTime = 0;    // сколько горит, с
+    float extinguish = 0;  // таймер тушения
+    bool Running() const { return !failed && !shutdown; }
+};
 
 class Aircraft {
 public:
+    void SetType(AircraftKind k) { type_ = &GetAircraftType(k); }
+    const AircraftType& Type() const { return *type_; }
+
     // pitchDeg — тангаж, gammaDeg — наклон траектории (для старта в воздухе).
     void Reset(Vector3 position, float headingDeg, float speedMs, bool onGround, const Controls& c,
-               float pitchDeg = 0.0f, float gammaDeg = 0.0f);
+               float pitchDeg = 0.0f, float gammaDeg = 0.0f, float fuelKg = -1.0f);
     void Step(float dt, const Controls& c, const Terrain& terrain, Vector3 wind);
+    void Fail(Failure f);
+    bool Failed(Failure f) const { return failures_[(int)f]; }
 
     // ---- состояние
     Vector3 pos{};            // центр масс, мир
@@ -54,7 +53,10 @@ public:
     Quaternion rot{0, 0, 0, 1}; // связанная → мир
     Vector3 omega{};          // рад/с, в связанных осях (x — крен вправо, z — нос вверх, -y — нос вправо)
 
-    float n1 = 22.0f;         // обороты вентилятора, %
+    Engine engines[2];
+    float fuel = 0;           // кг
+    float fuelFlow = 0;       // кг/с
+    float reverser = 0;       // 0 — убран, 1 — раскрыт
     float elevator = 0, aileron = 0, rudder = 0; // фактические отклонения, рад
     float flaps = 0;          // фактический угол закрылков, град
     float gear = 1;           // 0 — убрано, 1 — выпущено и на замках
@@ -65,7 +67,7 @@ public:
     float alpha = 0, beta = 0;    // рад
     float ias = 0, tas = 0, mach = 0; // м/с, м/с, M
     float gLoad = 1;              // перегрузка по нормали
-    float thrust = 0;             // Н
+    float thrust = 0;             // Н, суммарная
     float stallAlpha = 0;         // текущий критический угол атаки, рад
     bool onGround = false;        // обжаты стойки шасси
     int wheelsOnGround = 0;
@@ -82,18 +84,26 @@ public:
     Vector3 Right() const { return fs::Rotate({0, 0, 1}, rot); }
     Vector3 ToWorld(Vector3 local) const { return Vector3Add(pos, fs::Rotate(local, rot)); }
 
+    float Mass() const { return type_->emptyMass + type_->payload + fuel; }
     float PitchDeg() const;
     float BankDeg() const;
     float HeadingDeg() const;
+    float N1() const;             // средние обороты работающих двигателей
+    bool AnyEngineFire() const { return engines[0].fire || engines[1].fire; }
+
     // Балансировочный режим для горизонтального/наклонного полёта (для старта в воздухе).
     struct Trim { float alphaDeg, trim, throttle; };
-    static Trim ComputeTrim(float tasMs, float altM, float flapsDeg, bool gearDown, float gammaDeg);
+    static Trim ComputeTrim(const AircraftType& t, float mass, float tasMs, float altM, float flapsDeg,
+                            bool gearDown, float gammaDeg);
 
     float StallSpeedKt() const;   // скорость сваливания (приборная) при текущих массе и закрылках
     float SpeedLimitKt() const;   // текущее ограничение: VMO / VFE / VLE
 
 private:
     void Crash(const std::string& reason);
+    float EngineThrust(int i, float V, float rho, float dt, const Controls& c);
+    const AircraftType* type_ = &GetAircraftType(AircraftKind::LightJet);
     bool wheelContact_[3] = {false, false, false};
+    bool failures_[(int)Failure::Count] = {};
     float stallDrop_ = 0;   // в какую сторону сваливается крыло при срыве
 };

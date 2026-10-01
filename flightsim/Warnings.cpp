@@ -1,6 +1,7 @@
 #include "Warnings.h"
 #include "Aircraft.h"
 #include "Terrain.h"
+#include "World.h"
 
 using namespace fs;
 
@@ -24,13 +25,18 @@ const char* WarningSystem::Text(Alert a)
     case Alert::BankAngle: return "BANK ANGLE";
     case Alert::Overspeed: return "OVERSPEED";
     case Alert::Stall: return "STALL";
+    case Alert::EngFire: return "ENGINE FIRE";
+    case Alert::EngFail: return "ENGINE FAIL";
+    case Alert::GearUnsafe: return "GEAR UNSAFE";
+    case Alert::FlapsJam: return "FLAPS JAMMED";
+    case Alert::FuelLow: return "FUEL LOW";
     default: return "";
     }
 }
 
 bool WarningSystem::IsWarning(Alert a)
 {
-    return a == Alert::PullUp || a == Alert::Overspeed || a == Alert::Stall;
+    return a == Alert::PullUp || a == Alert::Overspeed || a == Alert::Stall || a == Alert::EngFire;
 }
 
 bool WarningSystem::AnyWarning() const
@@ -59,13 +65,13 @@ void WarningSystem::Update(const Aircraft& a, const Terrain& t, float dt)
 {
     bool cond[N] = {};
 
-    const float gearHeight = 1.75f;   // высота ЦМ над грунтом на стоянке
+    const float gearHeight = a.Type().restHeight;   // высота ЦМ над грунтом на стоянке
     float ra = (a.pos.y - gearHeight - t.SurfaceHeight(a.pos.x, a.pos.z)) * M_TO_FT;
     radioAltFt = fmaxf(ra, 0.0f);
     const float descentFpm = -a.vel.y * MS_TO_FPM;
     const float iasKt = a.ias * MS_TO_KT;
     const bool airborne = !a.onGround && radioAltFt > 30.0f;
-    const bool landingConfig = a.gear > 0.99f && a.flaps >= 19.0f;
+    const bool landingConfig = a.gear > 0.99f && a.flaps >= a.Type().flapDeg[2] - 1.0f;
 
     // ---- TAWS: прогноз траектории по текущему вектору скорости
     timeToImpact = -1;
@@ -79,8 +85,10 @@ void WarningSystem::Update(const Aircraft& a, const Terrain& t, float dt)
             float ground = t.SurfaceHeight(p.x, p.z);
             if (p.y - gearHeight - ground < margin) {
                 // На заходе в посадочной конфигурации полоса впереди — это не угроза.
-                bool runwayAhead = a.gear > 0.99f && Terrain::DistToRunway(p.x, p.z) < 1800.0f &&
-                                   ground < Terrain::kAirportElev + 15.0f;
+                float rwDist;
+                int api = world::NearestAirport(p.x, p.z, &rwDist);
+                bool runwayAhead = a.gear > 0.99f && rwDist < 1800.0f &&
+                                   ground < world::GetAirport(api).rwy.center.y + 15.0f;
                 if (!runwayAhead) timeToImpact = s;
                 break;
             }
@@ -96,10 +104,21 @@ void WarningSystem::Update(const Aircraft& a, const Terrain& t, float dt)
         cond[(int)Alert::PullUp] = sinkWarn || (timeToImpact > 0 && timeToImpact <= pullUpTime);
         cond[(int)Alert::Terrain] = timeToImpact > 0 && timeToImpact <= 35.0f;
         cond[(int)Alert::SinkRate] = sinkCaut;
-        cond[(int)Alert::TooLowGear] = airborne && radioAltFt < 500.0f && a.gear < 0.99f && iasKt < 190.0f && descentFpm > 0.0f;
+        cond[(int)Alert::TooLowGear] = airborne && radioAltFt < 500.0f && a.gear < 0.99f &&
+                                       iasKt < a.Type().approachKt + 60.0f && descentFpm > 0.0f;
         cond[(int)Alert::BankAngle] = airborne && fabsf(a.BankDeg()) > 35.0f;
         cond[(int)Alert::Overspeed] = iasKt > a.SpeedLimitKt() + 1.0f;
         cond[(int)Alert::Stall] = airborne && a.alpha > a.stallAlpha - 2.0f * DEG2RAD && a.ias > 15.0f;
+
+        // Отказы систем (ECAM): пожар — красный, остальное — жёлтое.
+        cond[(int)Alert::EngFire] = a.AnyEngineFire();
+        bool engOut = false;
+        for (int i = 0; i < a.Type().engineCount; ++i)
+            if (!a.engines[i].Running() || a.fuel <= 0.0f) engOut = true;
+        cond[(int)Alert::EngFail] = engOut;
+        cond[(int)Alert::GearUnsafe] = a.Failed(Failure::GearHydraulics) && a.gear < 0.999f;
+        cond[(int)Alert::FlapsJam] = a.Failed(Failure::FlapsJam);
+        cond[(int)Alert::FuelLow] = a.fuel < a.Type().maxFuel * 0.08f;
     }
 
     for (int i = 0; i < N; ++i) {

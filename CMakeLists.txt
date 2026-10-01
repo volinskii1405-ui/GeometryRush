@@ -80,6 +80,14 @@ add_executable(FlightSim
     flightsim/Terrain.cpp
     flightsim/Warnings.cpp
     flightsim/Autopilot.cpp
+    flightsim/AircraftType.cpp
+    flightsim/World.cpp
+    flightsim/Scenery.cpp
+    flightsim/Effects.cpp
+    flightsim/Missions.cpp
+    flightsim/Menu.cpp
+    flightsim/Config.cpp
+    flightsim/UiText.cpp
     flightsim/Audio.cpp
     flightsim/Scene.cpp
     flightsim/Hud.cpp
@@ -102,7 +110,10 @@ add_custom_command(TARGET FlightSim POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             ${CMAKE_CURRENT_SOURCE_DIR}/sounds
             $<TARGET_FILE_DIR:FlightSim>/sounds
-    COMMENT "Copying sounds")
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_CURRENT_SOURCE_DIR}/fonts
+            $<TARGET_FILE_DIR:FlightSim>/fonts
+    COMMENT "Copying sounds and fonts")
 
 # ---------------------------------------------------------------- инструменты
 if(GEOMETRY_RUSH_BUILD_TOOLS)

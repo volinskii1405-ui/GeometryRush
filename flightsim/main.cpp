@@ -1,55 +1,71 @@
-// Flight Sim — 3D-симулятор лёгкого реактивного самолёта на raylib.
-// Физика: 6 степеней свободы, аэродинамические коэффициенты, сваливание, шасси с амортизаторами.
-// Сигнализация: PULL UP / TERRAIN (GPWS + прогноз по рельефу), OVERSPEED, BANK ANGLE, STALL и др.
+// Flight Sim — 3D-симулятор самолёта на raylib.
+// Три самолёта (бизнес-джет, «Сессна», лайнер), физика с 6 степенями свободы, отказы, топливо,
+// автопилот, GPWS и другие предупреждения, погода и время суток, задания со звёздами.
 
 #include "Aircraft.h"
 #include "Audio.h"
 #include "Autopilot.h"
+#include "Config.h"
+#include "Effects.h"
 #include "Hud.h"
+#include "Menu.h"
+#include "Missions.h"
 #include "Scene.h"
 #include "Terrain.h"
+#include "UiText.h"
 #include "Warnings.h"
+#include "World.h"
 
 #include "rlgl.h"
 
 using namespace fs;
+using ui::L;
 
 namespace {
 
 constexpr float PHYSICS_DT = 1.0f / 240.0f;
 
-struct WindPreset { const char* name; float fromDeg, speedKt, gustKt, turbulence; };
-const WindPreset kWinds[] = {
-    {"CALM", 0, 0, 0, 0},
-    {"270/10", 270, 10, 0, 0.3f},
-    {"360/15 G25 (crosswind)", 360, 15, 10, 0.8f},
-    {"090/25 TURBULENT", 90, 25, 8, 1.6f},
-};
+struct WindPreset { float fromDeg, speedKt, gustKt, turbulence; };
+const WindPreset kWinds[] = {{0, 0, 0, 0}, {270, 10, 0, 0.3f}, {360, 15, 10, 0.8f}, {90, 25, 8, 1.6f}};
 constexpr int kWindCount = sizeof(kWinds) / sizeof(kWinds[0]);
-
-const char* kScenarioNames[] = {"", "TAKEOFF  RWY 09", "ILS APPROACH  RWY 09", "MOUNTAINS  LOW LEVEL"};
+const char* WindName(int w)
+{
+    switch (w) {
+    case 0: return L("calm", "штиль");
+    case 1: return "270/10";
+    case 2: return "360/15G25";
+    default: return L("090/25 turb.", "090/25 болт.");
+    }
+}
 
 struct Sim {
     Terrain terrain;
     Scene scene;
+    Effects fx;
     Aircraft aircraft;
     WarningSystem warnings;
     CalloutSystem callouts;
     Autopilot ap;
     AudioSystem audio;
     Controls ctl;
+    Environment env;
+    Config cfg;
+    Menu menu;
+    MissionRun run;
+    FlightSetup setup;
 
-    CamMode cam = CamMode::Chase;
-    int scenario = 1;
-    int wind = 0;
+    bool flying = false;       // идёт полёт (иначе — фон меню)
     bool paused = false;
     bool help = false;
     bool mouseYoke = false;
     bool gamepad = false;
+    CamMode cam = CamMode::Chase;
+    int wind = 0;
     float accumulator = 0;
-    float time = 0;
-    float crashAge = -1;
+    float time = 0, menuTime = 0;
+    float crashAge = -1, finishAge = -1;
     float touchdownTimer = 0, touchdownFpm = 0, touchdownCl = 0;
+    bool quit = false;
 };
 
 Vector3 WindAt(const Sim& s, Vector3 pos)
@@ -70,67 +86,133 @@ Vector3 WindAt(const Sim& s, Vector3 pos)
     return v;
 }
 
-void StartScenario(Sim& s, int which)
+// Свободный полёт из выбранных в меню параметров.
+FlightSetup FreeSetup(const Config& cfg)
 {
-    s.scenario = which;
+    FlightSetup s;
+    s.aircraft = (AircraftKind)(cfg.freeAircraft % (int)AircraftKind::Count);
+    s.airport = cfg.freeAirport % world::AirportCount();
+    s.targetAirport = s.airport;
+    s.time = (TimeOfDay)cfg.freeTime;
+    s.weather = (WeatherKind)cfg.freeWeather;
+    s.wind = cfg.freeWind;
+    s.fuelFrac = 0.25f * (cfg.freeFuel % 4 + 1);
+    s.fail = cfg.freeFailures ? FailPlan::Random : FailPlan::None;
+    s.goal = GoalKind::None;
+    const Runway& rw = world::GetAirport(s.airport).rwy;
+    int st = cfg.freeStart % 5;
+    if (st < 2) {
+        s.start = StartKind::Runway;
+        s.end = st;
+    } else if (st < 4) {
+        s.start = StartKind::Final;
+        s.end = st - 2;
+        s.finalNm = world::GetAirport(s.airport).main ? 6.0f : 3.0f;
+    } else {
+        s.start = StartKind::Air;
+        Vector3 d = rw.Dir(0);
+        Vector3 p = Vector3Subtract(rw.center, Vector3Scale(d, 6000.0f));
+        s.airPos = {p.x, rw.center.y * M_TO_FT + 3000.0f, p.z};
+        s.airHdg = rw.Course(0);
+        s.airSpeedKt = GetAircraftType(s.aircraft).cruiseKt;
+    }
+    return s;
+}
+
+void StartFlight(Sim& s, const FlightSetup& setup)
+{
+    s.setup = setup;
+    s.aircraft.SetType(setup.aircraft);
+    const AircraftType& t = s.aircraft.Type();
+    s.env = Environment::Make(setup.time, setup.weather);
+    s.scene.SetEnvironment(s.env);
+    s.fx.SetEnvironment(s.env);
+    s.fx.Clear();
+    s.wind = setup.wind;
+    s.run.Start(setup, s.terrain);
+
+    const Runway& rw = world::GetAirport(setup.airport).rwy;
+    const float mass = t.emptyMass + t.payload + (setup.fuelFrac < 0 ? t.defaultFuel : t.maxFuel * setup.fuelFrac);
+    const float fuel = setup.fuelFrac < 0 ? -1.0f : t.maxFuel * setup.fuelFrac;
     Controls c;
-    const float E = Terrain::kAirportElev;
-    const float L = Terrain::kRunwayHalfLen;
-    switch (which) {
-    case 2: {   // заход по ILS: 6 морских миль до точки приземления, на глиссаде 3°
-        c.flapsLever = 2;
-        c.gearDown = true;
-        float dist = 11000.0f;
-        float x = -(L - 300.0f) - dist;
-        float y = E + 1.75f + dist * tanf(3.0f * DEG2RAD);
-        float v = 135.0f * KT_TO_MS * sqrtf(1.225f / AirDensity(y));
-        Aircraft::Trim tr = Aircraft::ComputeTrim(v, y, ac::FLAP_DEG[2], true, -3.0f);
-        c.throttle = tr.throttle;
-        c.trim = tr.trim;
-        s.aircraft.Reset({x, y, 0}, 90.0f, v, false, c, tr.alphaDeg - 3.0f, -3.0f);
+    switch (setup.start) {
+    case StartKind::Runway: {
+        Vector3 d = rw.Dir(setup.end);
+        Vector3 p = Vector3Add(rw.Threshold(setup.end), Vector3Scale(d, rw.halfLen > 1000 ? 70.0f : 40.0f));
+        c.flapsLever = 1;
+        c.parkingBrake = true;
+        c.trim = t.kind == AircraftKind::Prop ? 0.1f : 0.25f;
+        s.aircraft.Reset({p.x, rw.center.y + t.restHeight, p.z}, rw.Course(setup.end), 0.0f, true, c, 0, 0, fuel);
+        s.ap.Reset(rw.Course(setup.end), roundf((rw.center.y * M_TO_FT + 3000.0f) / 100.0f) * 100.0f, t.climbKt, true, false);
         break;
     }
-    case 3: {   // низко над горами в сторону самой высокой вершины
+    case StartKind::Final: {
+        const bool main = world::GetAirport(setup.airport).main;
+        const float glide = main ? 3.0f : 3.5f, tdz = main ? 300.0f : 150.0f;
+        Vector3 d = rw.Dir(setup.end);
+        float dist = setup.finalNm * 1852.0f;
+        Vector3 p = Vector3Subtract(rw.Threshold(setup.end), Vector3Scale(d, dist));
+        float y = rw.center.y + t.restHeight + (dist + tdz) * tanf(glide * DEG2RAD);
+        bool gearFail = setup.fail == FailPlan::GearHydraulics;
+        bool flapsJam = setup.fail == FailPlan::FlapsJam;
+        c.flapsLever = flapsJam ? 0 : 2;
+        c.gearDown = !gearFail;
+        float v = (t.approachKt + (flapsJam ? 45.0f : 10.0f)) * KT_TO_MS * sqrtf(1.225f / AirDensity(y));
+        Aircraft::Trim tr = Aircraft::ComputeTrim(t, mass, v, y, t.flapDeg[c.flapsLever], c.gearDown, -glide);
+        c.throttle = tr.throttle;
+        c.trim = tr.trim;
+        s.aircraft.Reset({p.x, y, p.z}, rw.Course(setup.end), v, false, c, tr.alphaDeg - glide, -glide, fuel);
+        s.ap.Reset(rw.Course(setup.end), roundf(y * M_TO_FT / 100.0f) * 100.0f, t.approachKt + (flapsJam ? 45.0f : 10.0f), false, rw.ils);
+        break;
+    }
+    case StartKind::Air: {
+        Vector3 p = setup.airPos;
+        float hdg = setup.airHdg;
+        float yM = p.y * FT_TO_M;
+        if (setup.goal == GoalKind::Gates && !s.run.Gates().empty()) {
+            const MissionRun::Gate& g = s.run.Gates().front();
+            p = Vector3Subtract(g.pos, Vector3Scale(g.dir, 3500.0f));
+            yM = g.pos.y;
+            hdg = WrapDeg360(atan2f(g.dir.x, -g.dir.z) * RAD2DEG);
+        }
+        yM = fmaxf(yM, s.terrain.SurfaceHeight(p.x, p.z) + 250.0f);
         c.flapsLever = 0;
         c.gearDown = false;
-        Vector3 peak = s.terrain.HighestPoint();
-        Vector3 toCenter = Vector3Normalize(Vector3Subtract(Vector3{0, 0, 0}, Vector3{peak.x, 0, peak.z}));
-        Vector3 start = Vector3Add(Vector3{peak.x, 0, peak.z}, Vector3Scale(toCenter, 14000.0f));
-        float hdg = WrapDeg360(atan2f(peak.x - start.x, -(peak.z - start.z)) * RAD2DEG);
-        float y = fmaxf(peak.y * 0.75f, s.terrain.SurfaceHeight(start.x, start.z) + 450.0f);
-        float v = 220.0f * KT_TO_MS * sqrtf(1.225f / AirDensity(y));
-        Aircraft::Trim tr = Aircraft::ComputeTrim(v, y, 0.0f, false, 0.0f);
+        float v = setup.airSpeedKt * KT_TO_MS * sqrtf(1.225f / AirDensity(yM));
+        Aircraft::Trim tr = Aircraft::ComputeTrim(t, mass, v, yM, 0, !t.retractableGear, 0);
         c.throttle = tr.throttle;
         c.trim = tr.trim;
-        s.aircraft.Reset({start.x, y, start.z}, hdg, v, false, c, tr.alphaDeg, 0.0f);
-        break;
-    }
-    default: {  // на исполнительном старте ВПП 09, стояночный тормоз включён
-        s.scenario = 1;
-        c.throttle = 0.0f;
-        c.flapsLever = 1;
-        c.gearDown = true;
-        c.parkingBrake = true;
-        c.trim = 0.25f;
-        s.aircraft.Reset({-L + 70.0f, E + 1.74f, 0}, 90.0f, 0.0f, true, c);
+        s.aircraft.Reset({p.x, yM, p.z}, hdg, v, false, c, tr.alphaDeg, 0, fuel);
+        s.ap.Reset(hdg, roundf(yM * M_TO_FT / 100.0f) * 100.0f, setup.airSpeedKt, false, false);
         break;
     }
     }
     s.ctl = c;
     s.warnings.Reset();
     s.callouts.Reset();
-    {   // Задатчики автопилота/директора под сценарий
-        const Aircraft& a = s.aircraft;
-        float altFt = roundf(a.pos.y * M_TO_FT / 100.0f) * 100.0f;
-        if (s.scenario == 1) s.ap.Reset(90.0f, 3000.0f, 180.0f, true, false);
-        else if (s.scenario == 2) s.ap.Reset(90.0f, 2000.0f, 135.0f, false, true);
-        else s.ap.Reset(a.HeadingDeg(), altFt, 220.0f, false, false);
-    }
     s.scene.ResetCamera(s.aircraft);
     s.accumulator = 0;
-    s.crashAge = -1;
+    s.time = 0;
+    s.crashAge = s.finishAge = -1;
     s.touchdownTimer = 0;
     s.paused = false;
+    s.help = false;
+    s.flying = true;
+    s.mouseYoke = s.cfg.mouseYoke;
+    s.menu.Open(MenuScreen::None);
+    s.audio.StopAll();
+    s.warnings.Update(s.aircraft, s.terrain, 0.0f);
+}
+
+// Фон меню: самолёт на перроне главного аэродрома в ясный день.
+void ShowMenu(Sim& s, MenuScreen screen)
+{
+    FlightSetup bg;
+    bg.aircraft = (AircraftKind)(s.cfg.freeAircraft % (int)AircraftKind::Count);
+    StartFlight(s, bg);
+    s.flying = false;
+    s.menu.Open(screen);
+    s.menuTime = 0;
 }
 
 float Axis(int pad, int axis, float dead = 0.08f)
@@ -140,8 +222,7 @@ float Axis(int pad, int axis, float dead = 0.08f)
     return (v - Sign(v) * dead) / (1.0f - dead);
 }
 
-// Клавиатура двигает «штурвал» с конечной скоростью и возвращает его в нейтраль,
-// поэтому управление плавное, как у настоящего самолёта, а не «цифровое».
+// Клавиатура двигает «штурвал» с конечной скоростью и возвращает его в нейтраль.
 float KeyStick(float current, float input, float dt)
 {
     if (input != 0.0f) {
@@ -151,34 +232,26 @@ float KeyStick(float current, float input, float dt)
     return MoveTowards(current, 0.0f, 2.2f * dt);
 }
 
-void HandleInput(Sim& s, float dt)
+void HandleFlightInput(Sim& s, float dt)
 {
     Controls& c = s.ctl;
+    Aircraft& a = s.aircraft;
     auto down = [](int k) { return IsKeyDown(k) ? 1.0f : 0.0f; };
 
     if (IsKeyPressed(KEY_F1)) s.help = !s.help;
-    if (IsKeyPressed(KEY_ESCAPE) || IsGamepadButtonPressed(0, GAMEPAD_BUTTON_MIDDLE_RIGHT)) {
-        if (s.help) s.help = false;
-        else s.paused = !s.paused;
-    }
-    if (IsKeyPressed(KEY_R)) StartScenario(s, s.scenario);
-    if (s.paused || s.aircraft.crashed) {
-        if (IsKeyPressed(KEY_ONE)) StartScenario(s, 1);
-        if (IsKeyPressed(KEY_TWO)) StartScenario(s, 2);
-        if (IsKeyPressed(KEY_THREE)) StartScenario(s, 3);
+    if (IsKeyPressed(KEY_R)) {
+        StartFlight(s, s.setup);
+        return;
     }
     if (IsKeyPressed(KEY_C) || IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_UP))
         s.cam = (CamMode)(((int)s.cam + 1) % (int)CamMode::Count);
     if (IsKeyPressed(KEY_F8)) s.wind = (s.wind + 1) % kWindCount;
     if (IsKeyPressed(KEY_M)) s.mouseYoke = !s.mouseYoke;
-    if (s.paused) return;
 
     // ---- штурвал и педали
-    float kPitch = down(KEY_S) + down(KEY_DOWN) - down(KEY_W) - down(KEY_UP);
-    float kRoll = down(KEY_D) + down(KEY_RIGHT) - down(KEY_A) - down(KEY_LEFT);
+    float kPitch = Clampf(down(KEY_S) + down(KEY_DOWN) - down(KEY_W) - down(KEY_UP), -1, 1);
+    float kRoll = Clampf(down(KEY_D) + down(KEY_RIGHT) - down(KEY_A) - down(KEY_LEFT), -1, 1);
     float kYaw = down(KEY_E) - down(KEY_Q);
-    kPitch = Clampf(kPitch, -1, 1);
-    kRoll = Clampf(kRoll, -1, 1);
 
     bool padAvail = IsGamepadAvailable(0);
     float gp = 0, gr = 0, gy = 0;
@@ -192,16 +265,15 @@ void HandleInput(Sim& s, float dt)
     }
     if (kPitch != 0 || kRoll != 0 || kYaw != 0) s.gamepad = false;
 
-    // ---- автопилот: любое заметное движение штурвала отключает его (как усилие на штурвале)
+    // Любое заметное движение штурвала отключает автопилот (как усилие на штурвале).
     if (s.ap.apOn) {
         bool manual = kPitch != 0 || kRoll != 0 || (s.gamepad && (fabsf(gp) > 0.3f || fabsf(gr) > 0.3f));
         if (s.mouseYoke && !s.gamepad) {
             Vector2 m = GetMousePosition();
             float range = GetScreenHeight() * 0.3f;
-            manual = manual || fabsf(m.y - GetScreenHeight() * 0.4f) > range * 0.6f ||
-                     fabsf(m.x - GetScreenWidth() * 0.5f) > range * 0.6f;
+            manual = manual || fabsf(m.y - GetScreenHeight() * 0.4f) > range * 0.6f || fabsf(m.x - GetScreenWidth() * 0.5f) > range * 0.6f;
         }
-        if (manual) s.ap.DisconnectAp("AP OFF");
+        if (manual) s.ap.DisconnectAp("");
     }
 
     if (s.ap.apOn) {
@@ -212,10 +284,9 @@ void HandleInput(Sim& s, float dt)
         c.yaw = gy;
     } else if (s.mouseYoke) {
         Vector2 m = GetMousePosition();
-        float cx = GetScreenWidth() * 0.5f, cy = GetScreenHeight() * 0.4f;
         float range = GetScreenHeight() * 0.3f;
-        c.pitch = Clampf((m.y - cy) / range, -1, 1);
-        c.roll = Clampf((m.x - cx) / range, -1, 1);
+        c.pitch = Clampf((m.y - GetScreenHeight() * 0.4f) / range, -1, 1);
+        c.roll = Clampf((m.x - GetScreenWidth() * 0.5f) / range, -1, 1);
         c.yaw = KeyStick(c.yaw, kYaw, dt);
     } else {
         c.pitch = KeyStick(c.pitch, kPitch, dt);
@@ -223,45 +294,68 @@ void HandleInput(Sim& s, float dt)
         c.yaw = KeyStick(c.yaw, kYaw, dt);
     }
 
-    // ---- РУД
-    float thr = down(KEY_LEFT_SHIFT) + down(KEY_RIGHT_SHIFT) + down(KEY_PAGE_UP)
-              - down(KEY_LEFT_CONTROL) - down(KEY_RIGHT_CONTROL) - down(KEY_PAGE_DOWN);
+    // ---- РУД и реверс (Ctrl на малом газе после касания)
+    float thr = down(KEY_LEFT_SHIFT) + down(KEY_RIGHT_SHIFT) + down(KEY_PAGE_UP) - down(KEY_LEFT_CONTROL) - down(KEY_RIGHT_CONTROL) -
+                down(KEY_PAGE_DOWN);
     if (padAvail) thr -= Axis(0, GAMEPAD_AXIS_RIGHT_Y) * 1.5f;
+    bool ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+    c.reverse = ctrl && c.throttle <= 0.001f && a.onGround && a.Type().hasReverser;
     if (s.ap.athrOn && (thr != 0 || IsKeyPressed(KEY_Z) || IsKeyPressed(KEY_X))) s.ap.DisconnectAthr();
     c.throttle = Clampf(c.throttle + Clampf(thr, -1.5f, 1.5f) * 0.45f * dt, 0, 1);
     if (IsKeyPressed(KEY_Z)) c.throttle = 0.0f;
-    if (IsKeyPressed(KEY_X)) c.throttle = 1.0f;
+    if (IsKeyPressed(KEY_X)) {
+        c.throttle = 1.0f;
+        if (!a.onGround) s.ap.Toga(a);   // уход на второй круг
+    }
 
-    // ---- автопилот: включение режимов и задатчики (удержание клавиши — быстрее)
+    // ---- автопилот: режимы и задатчики (удержание клавиши — быстрее)
     float ra = s.warnings.radioAltFt;
-    if (IsKeyPressed(KEY_T)) s.ap.ToggleAp(s.aircraft, ra);
-    if (IsKeyPressed(KEY_Y)) s.ap.ToggleAthr(s.aircraft);
+    if (IsKeyPressed(KEY_T)) s.ap.ToggleAp(a, ra);
+    if (IsKeyPressed(KEY_Y)) s.ap.ToggleAthr(a);
     if (IsKeyPressed(KEY_L)) s.ap.ToggleApp();
+    if (IsKeyPressed(KEY_U)) s.ap.ToggleVs(a);
     if (IsKeyPressed(KEY_O)) s.ap.fdOn = !s.ap.fdOn;
     auto step = [](int key) { return IsKeyPressed(key) || IsKeyPressedRepeat(key); };
     if (step(KEY_NINE)) s.ap.hdgBug = WrapDeg360(s.ap.hdgBug - 1.0f);
     if (step(KEY_ZERO)) s.ap.hdgBug = WrapDeg360(s.ap.hdgBug + 1.0f);
     if (step(KEY_MINUS)) s.ap.altTarget = fmaxf(s.ap.altTarget - 100.0f, 0.0f);
-    if (step(KEY_EQUAL)) s.ap.altTarget = fminf(s.ap.altTarget + 100.0f, 20000.0f);
-    if (step(KEY_COMMA)) s.ap.spdTarget = fmaxf(s.ap.spdTarget - 5.0f, 100.0f);
-    if (step(KEY_PERIOD)) s.ap.spdTarget = fminf(s.ap.spdTarget + 5.0f, 300.0f);
+    if (step(KEY_EQUAL)) s.ap.altTarget = fminf(s.ap.altTarget + 100.0f, 30000.0f);
+    if (step(KEY_COMMA)) s.ap.spdTarget = fmaxf(s.ap.spdTarget - 5.0f, 50.0f);
+    if (step(KEY_PERIOD)) s.ap.spdTarget = fminf(s.ap.spdTarget + 5.0f, 350.0f);
+    if (step(KEY_SEMICOLON)) s.ap.vsTarget = fmaxf(s.ap.vsTarget - 100.0f, -4000.0f);
+    if (step(KEY_APOSTROPHE)) s.ap.vsTarget = fminf(s.ap.vsTarget + 100.0f, 4000.0f);
 
     // ---- триммер
     float trim = down(KEY_RIGHT_BRACKET) + down(KEY_HOME) - down(KEY_LEFT_BRACKET) - down(KEY_END);
-    if (padAvail) trim += (IsGamepadButtonDown(0, GAMEPAD_BUTTON_LEFT_FACE_UP) ? 1.0f : 0.0f)
-                        - (IsGamepadButtonDown(0, GAMEPAD_BUTTON_LEFT_FACE_DOWN) ? 1.0f : 0.0f);
-    if (trim != 0 && s.ap.apOn) s.ap.DisconnectAp("AP OFF");   // ручной триммер отключает AP
+    if (padAvail)
+        trim += (IsGamepadButtonDown(0, GAMEPAD_BUTTON_LEFT_FACE_UP) ? 1.0f : 0.0f) - (IsGamepadButtonDown(0, GAMEPAD_BUTTON_LEFT_FACE_DOWN) ? 1.0f : 0.0f);
+    if (trim != 0 && s.ap.apOn) s.ap.DisconnectAp("");   // ручной триммер отключает AP
     c.trim = Clampf(c.trim + Clampf(trim, -1, 1) * 0.25f * dt, -1, 1);
 
-    // ---- механизация, шасси, тормоза
+    // ---- механизация, шасси, тормоза, аварийные действия
     if (IsKeyPressed(KEY_F) || IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_TRIGGER_1)) {
         if (c.flapsLever < 3) { ++c.flapsLever; s.audio.PlayClick(); }
     }
     if (IsKeyPressed(KEY_V) || IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_TRIGGER_1)) {
         if (c.flapsLever > 0) { --c.flapsLever; s.audio.PlayClick(); }
     }
-    if (IsKeyPressed(KEY_G) || IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_LEFT)) {
+    if ((IsKeyPressed(KEY_G) || IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_LEFT)) && a.Type().retractableGear) {
         c.gearDown = !c.gearDown;
+        s.audio.PlayClick();
+    }
+    if (IsKeyPressed(KEY_H) && a.Type().retractableGear) {   // аварийный выпуск шасси
+        c.altGear = true;
+        c.gearDown = true;
+        s.audio.PlayClick();
+    }
+    if (IsKeyPressed(KEY_J)) {   // пожарный кран: горящий двигатель, иначе — отказавший
+        int target = -1;
+        for (int i = 0; i < a.Type().engineCount; ++i)
+            if (a.engines[i].fire) target = i;
+        if (target < 0)
+            for (int i = 0; i < a.Type().engineCount; ++i)
+                if (a.engines[i].failed && !a.engines[i].shutdown) target = i;
+        if (target >= 0) c.fireHandle[target] = true;
         s.audio.PlayClick();
     }
     if (IsKeyPressed(KEY_P)) { c.parkingBrake = !c.parkingBrake; s.audio.PlayClick(); }
@@ -271,6 +365,63 @@ void HandleInput(Sim& s, float dt)
     }
     bool brake = IsKeyDown(KEY_SPACE) || IsKeyDown(KEY_B) || IsGamepadButtonDown(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
     c.brakes = MoveTowards(c.brakes, brake ? 1.0f : 0.0f, 3.0f * dt);
+}
+
+void UpdateFlight(Sim& s, float dt)
+{
+    s.time += dt;
+    s.accumulator += dt;
+    bool wasCrashed = s.aircraft.crashed;
+    bool touchdown = false;
+    while (s.accumulator >= PHYSICS_DT) {
+        s.ap.Update(s.aircraft, s.warnings.radioAltFt, s.ctl, PHYSICS_DT);
+        s.aircraft.Step(PHYSICS_DT, s.ctl, s.terrain, WindAt(s, s.aircraft.pos));
+        s.accumulator -= PHYSICS_DT;
+        if (s.aircraft.touchdown) {
+            s.aircraft.touchdown = false;
+            touchdown = true;
+            s.run.OnTouchdown(s.aircraft);
+        }
+    }
+    if (touchdown) {
+        s.touchdownFpm = s.aircraft.touchdownFpm;
+        int ap = world::NearestAirport(s.aircraft.pos.x, s.aircraft.pos.z);
+        s.touchdownCl = fabsf(world::GetAirport(ap).rwy.Local(s.aircraft.pos.x, s.aircraft.pos.z).y);
+        s.touchdownTimer = 6.0f;
+        s.audio.PlayTouchdown(fabsf(s.touchdownFpm) / 600.0f);
+    }
+    if (s.aircraft.crashed && !wasCrashed) {
+        s.crashAge = 0;
+        s.audio.PlayCrash();
+    }
+    if (s.crashAge >= 0) s.crashAge += dt;
+    s.touchdownTimer = fmaxf(s.touchdownTimer - dt, 0.0f);
+    s.warnings.Update(s.aircraft, s.terrain, dt);
+    s.callouts.Update(s.aircraft, s.warnings.radioAltFt, s.ctl.throttle, dt);
+    s.fx.Update(s.aircraft, s.env, WindAt(s, s.aircraft.pos), dt, touchdown);
+    s.run.Update(s.aircraft, s.warnings, s.terrain, dt);
+
+    // Итоги задания — через пару секунд после завершения.
+    if (s.run.Finished() && s.finishAge < 0) {
+        s.finishAge = 0;
+        if (s.run.Success() && s.setup.mission >= 0) {
+            const std::string id = MissionList()[s.setup.mission].id;
+            int stars = s.run.Stars();
+            if (stars > s.cfg.Stars(id)) {
+                s.cfg.stars[id] = stars;
+                s.cfg.Save();
+            }
+        }
+    }
+    if (s.finishAge >= 0) {
+        s.finishAge += dt;
+        if (s.finishAge > (s.aircraft.crashed ? 3.0f : 1.5f) && s.menu.Screen() == MenuScreen::None) {
+            s.menu.Open(MenuScreen::Results);
+            s.menuTime = 0;
+        }
+    }
+    // Авария в свободном полёте.
+    if (!s.run.Active() && s.crashAge > 3.0f && s.menu.Screen() == MenuScreen::None) s.menu.Open(MenuScreen::Crash);
 }
 
 } // namespace
@@ -285,78 +436,116 @@ int main()
     rlSetClipPlanes(1.0, 60000.0);
 
     static Sim s;
+    s.cfg.Load();
+    ui::ru = s.cfg.ru;
+    ui::LoadFonts();
     s.audio.Init();
+    SetMasterVolume(s.cfg.volume / 100.0f);
     s.scene.Init();
+    s.fx.Init();
     s.terrain.Generate(1337u);
     s.terrain.BuildMeshes(s.scene.LitShader());
-    StartScenario(s, 1);
+    s.scene.BuildWorld(s.terrain);
+    ShowMenu(s, MenuScreen::Main);
 
-    bool quit = false;
-    while (!WindowShouldClose() && !quit) {
+    while (!WindowShouldClose() && !s.quit) {
         float dt = fminf(GetFrameTime(), 0.1f);
-        HandleInput(s, dt);
-        if (s.paused && IsKeyPressed(KEY_Q)) quit = true;
+        s.menuTime += dt;
 
-        if (!s.paused) {
-            s.time += dt;
-            s.accumulator += dt;
-            bool wasCrashed = s.aircraft.crashed;
-            while (s.accumulator >= PHYSICS_DT) {
-                s.ap.Update(s.aircraft, s.warnings.radioAltFt, s.ctl, PHYSICS_DT);
-                s.aircraft.Step(PHYSICS_DT, s.ctl, s.terrain, WindAt(s, s.aircraft.pos));
-                s.accumulator -= PHYSICS_DT;
+        bool menuOpen = s.menu.Screen() != MenuScreen::None;
+        if (s.flying && !menuOpen) {
+            if (IsKeyPressed(KEY_ESCAPE)) {
+                if (s.help) s.help = false;
+                else {
+                    s.paused = true;
+                    s.menu.Open(MenuScreen::Pause);
+                }
+            } else {
+                HandleFlightInput(s, dt);
             }
-            if (s.aircraft.touchdown) {
-                s.aircraft.touchdown = false;
-                s.touchdownFpm = s.aircraft.touchdownFpm;
-                s.touchdownCl = fabsf(s.aircraft.pos.z);
-                s.touchdownTimer = 6.0f;
-                s.audio.PlayTouchdown(fabsf(s.touchdownFpm) / 600.0f);
-            }
-            if (s.aircraft.crashed && !wasCrashed) {
-                s.crashAge = 0;
-                s.audio.PlayCrash();
-            }
-            if (s.crashAge >= 0) s.crashAge += dt;
-            s.touchdownTimer = fmaxf(s.touchdownTimer - dt, 0.0f);
-            s.warnings.Update(s.aircraft, s.terrain, dt);
-            s.callouts.Update(s.aircraft, s.warnings.radioAltFt, s.ctl.throttle, dt);
         }
+        if (s.flying && !s.paused && s.menu.Screen() == MenuScreen::None) UpdateFlight(s, dt);
+        else if (s.flying && s.menu.Screen() == MenuScreen::Results) s.fx.Update(s.aircraft, s.env, {}, dt, false);
+
+        bool sounding = s.flying && !s.paused && s.menu.Screen() != MenuScreen::Results;
         if (s.ap.apOffSound) {
             s.ap.apOffSound = false;
-            s.audio.PlayApDisconnect();
+            if (sounding) s.audio.PlayApDisconnect();
         }
-        s.audio.Update(s.aircraft, s.warnings, s.callouts, s.paused);
+        s.audio.Update(s.aircraft, s.warnings, s.callouts, !sounding);
         s.scene.crashAge = s.crashAge;
-        s.scene.UpdateCamera(s.aircraft, s.cam, dt);
+        if (s.flying) s.scene.UpdateCamera(s.aircraft, s.cam, dt);
+        else s.scene.MenuCamera(s.aircraft.pos, s.menuTime);
 
         BeginDrawing();
-        ClearBackground(Color{150, 180, 215, 255});
-        s.scene.Draw(s.aircraft, s.terrain, s.cam, s.time, WindAt(s, s.aircraft.pos));
+        ClearBackground(s.env.horizon);
+        s.scene.Draw(s.aircraft, s.terrain, s.flying ? s.cam : CamMode::Orbit, s.time + s.menuTime, WindAt(s, s.aircraft.pos), s.fx);
+        if (s.flying && s.run.Setup().goal == GoalKind::Gates) {
+            BeginMode3D(s.scene.camera);
+            s.run.DrawGates();
+            EndMode3D();
+        }
 
-        HudInfo info;
-        info.cam = s.cam;
-        info.mouseYoke = s.mouseYoke;
-        info.gamepad = s.gamepad;
-        info.paused = s.paused;
-        info.showHelp = s.help;
-        info.windPreset = s.wind;
-        info.windName = kWinds[s.wind].name;
-        info.scenarioName = kScenarioNames[s.scenario];
-        info.time = s.time;
-        info.lastTouchdownFpm = s.touchdownFpm;
-        info.touchdownMsgTimer = s.touchdownTimer;
-        info.touchdownCenterline = s.touchdownCl;
-        info.ap = &s.ap;
-        info.callouts = &s.callouts;
-        DrawHud(s.aircraft, s.ctl, s.warnings, s.terrain, s.scene.camera, info);
-        DrawFPS(GetScreenWidth() - 90, GetScreenHeight() - 20);
+        if (s.flying) {
+            bool below = !s.env.overcast || s.scene.camera.position.y < s.env.cloudBase;
+            if (s.cam == CamMode::Cockpit) s.fx.DrawWindshield(s.env, s.aircraft.ias, below);
+            HudInfo info;
+            info.cam = s.cam;
+            info.mouseYoke = s.mouseYoke;
+            info.gamepad = s.gamepad;
+            info.paused = s.paused;
+            info.showHelp = s.help;
+            info.windName = WindName(s.wind);
+            info.time = s.time;
+            info.lastTouchdownFpm = s.touchdownFpm;
+            info.touchdownMsgTimer = s.touchdownTimer;
+            info.touchdownCenterline = s.touchdownCl;
+            info.ap = &s.ap;
+            info.callouts = &s.callouts;
+            std::string title;
+            if (s.run.Active()) {
+                title = s.run.Title();
+                info.missionTitle = title.c_str();
+                info.missionLines = s.run.HudLines(s.aircraft);
+            }
+            DrawHud(s.aircraft, s.ctl, s.warnings, s.terrain, s.scene.camera, info);
+        }
+
+        MenuAction act = s.menu.Update(s.cfg, s.run, s.aircraft, s.menuTime);
+        switch (act.kind) {
+        case MenuAction::StartMission:
+            s.menu.selectedMission = act.index;
+            StartFlight(s, MissionList()[act.index].setup);
+            break;
+        case MenuAction::StartFree:
+            s.cfg.Save();
+            StartFlight(s, FreeSetup(s.cfg));
+            break;
+        case MenuAction::Resume:
+            s.paused = false;
+            s.menu.Open(MenuScreen::None);
+            break;
+        case MenuAction::Restart: StartFlight(s, s.setup); break;
+        case MenuAction::ToggleHelp:
+            s.help = !s.help;
+            s.paused = false;
+            s.menu.Open(MenuScreen::None);
+            break;
+        case MenuAction::ToMain: ShowMenu(s, act.index == 1 ? MenuScreen::Missions : MenuScreen::Main); break;
+        case MenuAction::Quit: s.quit = true; break;
+        case MenuAction::SettingsChanged: SetMasterVolume(s.cfg.volume / 100.0f); break;
+        default: break;
+        }
+        if (s.cfg.showFps) DrawFPS(GetScreenWidth() - 90, 6);
         EndDrawing();
     }
 
+    s.cfg.Save();
     s.terrain.Unload();
+    s.fx.Unload();
     s.scene.Unload();
     s.audio.Shutdown();
+    ui::UnloadFonts();
     CloseWindow();
     return 0;
 }
