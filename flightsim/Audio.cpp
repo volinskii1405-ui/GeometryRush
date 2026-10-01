@@ -137,6 +137,24 @@ void AudioSystem::Init()
         for (size_t i = 0; i < b.size(); ++i) b[i] = 0.5f * Noise() * expf(-(float)i / (0.004f * RATE));
         click_ = MakeSound(b);
     }
+
+    // Записанные сигналы из папки sounds/ рядом с программой заменяют синтезированные.
+    // Если файла нет — остаётся синтезированный тон.
+    struct File { Alert alert; const char* name; };
+    const File files[] = {
+        {Alert::PullUp, "pull_up.ogg"},       {Alert::Terrain, "terrain.ogg"},
+        {Alert::SinkRate, "sink_rate.ogg"},   {Alert::TooLowGear, "too_low_gear.ogg"},
+        {Alert::BankAngle, "bank_angle.ogg"}, {Alert::Overspeed, "overspeed.ogg"},
+        {Alert::Stall, "stall.ogg"},
+    };
+    for (const File& f : files) {
+        const char* path = TextFormat("%ssounds/%s", GetApplicationDirectory(), f.name);
+        if (!FileExists(path)) continue;
+        Sound snd = LoadSound(path);
+        if (snd.frameCount == 0) continue;
+        UnloadSound(alerts_[(int)f.alert]);
+        alerts_[(int)f.alert] = snd;
+    }
 }
 
 void AudioSystem::Shutdown()

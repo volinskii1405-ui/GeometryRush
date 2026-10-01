@@ -96,6 +96,13 @@ if(APPLE)
     target_link_libraries(FlightSim PRIVATE "-framework IOKit" "-framework Cocoa" "-framework OpenGL")
 endif()
 
+# Записанные голосовые сигналы кладём рядом с симулятором.
+add_custom_command(TARGET FlightSim POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_CURRENT_SOURCE_DIR}/sounds
+            $<TARGET_FILE_DIR:FlightSim>/sounds
+    COMMENT "Copying sounds")
+
 # ---------------------------------------------------------------- инструменты
 if(GEOMETRY_RUSH_BUILD_TOOLS)
     add_executable(level_check tools/level_check.cpp ${GAME_CORE_SOURCES})
