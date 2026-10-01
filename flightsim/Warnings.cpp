@@ -30,13 +30,15 @@ const char* WarningSystem::Text(Alert a)
     case Alert::GearUnsafe: return "GEAR UNSAFE";
     case Alert::FlapsJam: return "FLAPS JAMMED";
     case Alert::FuelLow: return "FUEL LOW";
+    case Alert::Structure: return "STRUCTURAL FAILURE";
+    case Alert::Overstress: return "OVERSTRESS";
     default: return "";
     }
 }
 
 bool WarningSystem::IsWarning(Alert a)
 {
-    return a == Alert::PullUp || a == Alert::Overspeed || a == Alert::Stall || a == Alert::EngFire;
+    return a == Alert::PullUp || a == Alert::Overspeed || a == Alert::Stall || a == Alert::EngFire || a == Alert::Structure;
 }
 
 bool WarningSystem::AnyWarning() const
@@ -119,6 +121,8 @@ void WarningSystem::Update(const Aircraft& a, const Terrain& t, float dt)
         cond[(int)Alert::GearUnsafe] = a.Failed(Failure::GearHydraulics) && a.gear < 0.999f;
         cond[(int)Alert::FlapsJam] = a.Failed(Failure::FlapsJam);
         cond[(int)Alert::FuelLow] = a.fuel < a.Type().maxFuel * 0.08f;
+        cond[(int)Alert::Structure] = a.Broken();
+        cond[(int)Alert::Overstress] = a.overstressed && !a.Broken();
     }
 
     for (int i = 0; i < N; ++i) {

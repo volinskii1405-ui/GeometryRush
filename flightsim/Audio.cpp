@@ -281,7 +281,7 @@ void AudioSystem::Update(const Aircraft& a, const WarningSystem& w, CalloutSyste
     }
 
     // Отказы: звонок при пожаре, одиночный сигнал при появлении нового отказа.
-    for (Alert s : {Alert::EngFail, Alert::GearUnsafe, Alert::FlapsJam, Alert::FuelLow}) {
+    for (Alert s : {Alert::EngFail, Alert::GearUnsafe, Alert::FlapsJam, Alert::FuelLow, Alert::Overstress, Alert::Structure}) {
         bool on = !paused && w.Active(s);
         if (on && !prevCaution_[(int)s]) PlaySound(chime_);
         prevCaution_[(int)s] = on;

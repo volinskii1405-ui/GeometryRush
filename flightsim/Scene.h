@@ -31,10 +31,10 @@ public:
 private:
     void DrawSky();
     void DrawAirport(int index, float time, Vector3 wind);
-    void DrawAircraftModel(const Aircraft& a, float time);
-    void DrawLightJet(const Aircraft& a, const Matrix& world);
-    void DrawProp(const Aircraft& a, const Matrix& world, float time);
-    void DrawAirliner(const Aircraft& a, const Matrix& world);
+    void DrawAircraftModel(const Aircraft& a, float time, bool self = true);   // self=false — только обломки
+    void DrawLightJet(const Aircraft& a, const Matrix& world, int mask);
+    void DrawProp(const Aircraft& a, const Matrix& world, float time, int mask);
+    void DrawAirliner(const Aircraft& a, const Matrix& world, int mask);
     void DrawShadow(const Aircraft& a, const Terrain& t);
     void DrawCrashFx(const Aircraft& a);
     void Part(const Mesh& mesh, Matrix local, Matrix world, Color c, float spec = 0.35f);

@@ -531,20 +531,28 @@ void Scene::DrawAirport(int index, float time, Vector3 wind)
 
 // ---------------------------------------------------------------- модели самолётов
 
-void Scene::DrawLightJet(const Aircraft& a, const Matrix& world)
+// Какие части модели рисовать: целый самолёт без оторванных частей или только обломок.
+enum { PM_BODY = 1, PM_WING_L = 2, PM_WING_R = 4, PM_TAIL = 8, PM_ALL = 15 };
+static bool WingOn(int mask, float s) { return mask & (s < 0 ? PM_WING_L : PM_WING_R); }
+
+void Scene::DrawLightJet(const Aircraft& a, const Matrix& world, int mask)
 {
     const Color body{236, 238, 242, 255}, accent{196, 34, 46, 255}, glass{28, 38, 54, 255};
     const Color wing{208, 212, 218, 255}, surface{178, 184, 194, 255}, dark{40, 42, 46, 255}, tire{25, 25, 25, 255};
+    const bool B = mask & PM_BODY;
 
+    if (B) {
     Part(sphere_, Xf().S(7.6f, 0.95f, 0.95f), world, body, 0.5f);
     Part(sphere_, Xf().S(7.63f, 0.16f, 0.968f).T(0, -0.1f, 0), world, accent, 0.5f);
     Part(sphere_, Xf().S(3.2f, 0.7f, 0.6f).T(-5.2f, 0.35f, 0), world, body, 0.5f);
     Part(sphere_, Xf().S(1.7f, 0.6f, 0.8f).T(4.9f, 0.42f, 0), world, glass, 0.9f);
     for (int i = 0; i < 5; ++i)
         for (float s : {-1.0f, 1.0f}) Part(cube_, Xf().S(0.38f, 0.3f, 0.05f).T(-2.2f + i * 1.1f, 0.25f, s * 0.915f), world, glass, 0.9f);
+    }
 
     const Vector3 wingRoot{0.2f, -0.55f, 0.0f};
     for (float s : {-1.0f, 1.0f}) {
+        if (WingOn(mask, s)) {
         Matrix wingFrame = Xf().RX(-s * 3.0f * DEG2RAD).RY(-s * 12.0f * DEG2RAD).T(wingRoot);
         Part(cube_, Xf().S(2.3f, 0.22f, 7.9f).T(0, 0, s * 3.95f).Then(wingFrame), world, wing, 0.4f);
         float ail = s > 0 ? -a.aileron : a.aileron;
@@ -552,15 +560,20 @@ void Scene::DrawLightJet(const Aircraft& a, const Matrix& world)
         Part(cube_, Xf().S(0.6f, 0.14f, 3.7f).T(-0.3f, 0, 0).RZ(a.flaps * DEG2RAD).T(-1.15f, 0, s * 2.95f).Then(wingFrame), world, surface, 0.3f);
         Part(cube_, Xf().S(0.7f, 0.06f, 2.4f).T(-0.35f, 0, 0).RZ(-a.speedbrake * 45.0f * DEG2RAD).T(-0.25f, 0.12f, s * 3.2f).Then(wingFrame),
              world, surface, 0.3f);
+        }
+        if (B) {
         Part(sphere_, Xf().S(2.0f, 0.6f, 0.6f).T(-3.6f, 0.65f, s * 1.65f), world, Color{214, 218, 224, 255}, 0.6f);
         Part(sphere_, Xf().S(0.12f, 0.47f, 0.47f).T(-1.66f, 0.65f, s * 1.65f), world, dark, 0.2f);
         Part(cube_, Xf().S(1.2f, 0.18f, 0.75f).T(-3.6f, 0.58f, s * 1.0f), world, body, 0.4f);
         if (a.reverser > 0.05f)   // створки реверса
             Part(cube_, Xf().S(0.5f, 0.08f, 0.9f).RZ(-a.reverser * 0.8f).T(-5.3f, 0.65f + 0.45f, s * 1.65f), world, dark, 0.3f);
+        }
+        if (!(mask & PM_TAIL)) continue;
         Matrix stabFrame = Xf().RY(-s * 10.0f * DEG2RAD).T(-7.3f, 3.42f, 0.0f);
         Part(cube_, Xf().S(1.7f, 0.16f, 3.1f).T(0, 0, s * 1.55f).Then(stabFrame), world, wing, 0.4f);
         Part(cube_, Xf().S(0.6f, 0.1f, 2.9f).T(-0.3f, 0, 0).RZ(-a.elevator).T(-0.85f, 0, s * 1.6f).Then(stabFrame), world, surface, 0.3f);
     }
+    if (!B) return;
     Matrix finFrame = Xf().RZ(25.0f * DEG2RAD).T(-6.2f, 0.7f, 0.0f);
     Part(cube_, Xf().S(2.4f, 3.0f, 0.24f).T(0, 1.5f, 0).Then(finFrame), world, body, 0.4f);
     Part(cube_, Xf().S(0.75f, 2.7f, 0.18f).T(-0.375f, 1.4f, 0).RY(a.rudder).T(-1.2f, 0, 0).Then(finFrame), world, accent, 0.3f);
@@ -578,32 +591,41 @@ void Scene::DrawLightJet(const Aircraft& a, const Matrix& world)
     }
 }
 
-void Scene::DrawProp(const Aircraft& a, const Matrix& world, float time)
+void Scene::DrawProp(const Aircraft& a, const Matrix& world, float time, int mask)
 {
     const Color body{240, 240, 236, 255}, accent{30, 70, 150, 255}, glass{40, 52, 68, 255};
     const Color surface{214, 216, 220, 255}, dark{40, 40, 42, 255}, tire{25, 25, 25, 255};
+    const bool B = mask & PM_BODY;
 
+    if (B) {
     Part(sphere_, Xf().S(3.0f, 0.72f, 0.6f).T(-0.3f, 0.05f, 0), world, body, 0.4f);
     Part(sphere_, Xf().S(3.02f, 0.12f, 0.605f).T(-0.3f, -0.15f, 0), world, accent, 0.4f);
     Part(sphere_, Xf().S(2.7f, 0.32f, 0.28f).T(-3.3f, 0.25f, 0), world, body, 0.4f);
     Part(sphere_, Xf().S(1.25f, 0.42f, 0.62f).T(0.55f, 0.42f, 0), world, glass, 0.9f);
     Part(sphere_, Xf().S(0.95f, 0.55f, 0.55f).T(1.75f, 0.0f, 0), world, body, 0.5f);
+    }
     // Крыло-высокоплан с подкосами
     for (float s : {-1.0f, 1.0f}) {
+        if (WingOn(mask, s)) {
         Matrix wingFrame = Xf().RX(-s * 1.5f * DEG2RAD).T(-0.3f, 0.95f, 0.0f);
         Part(cube_, Xf().S(1.5f, 0.15f, 5.5f).T(0, 0, s * 2.75f).Then(wingFrame), world, body, 0.4f);
         float ail = s > 0 ? -a.aileron : a.aileron;
         Part(cube_, Xf().S(0.4f, 0.08f, 1.8f).T(-0.2f, 0, 0).RZ(ail).T(-0.75f, 0, s * 4.3f).Then(wingFrame), world, surface, 0.3f);
         Part(cube_, Xf().S(0.45f, 0.08f, 2.4f).T(-0.22f, 0, 0).RZ(a.flaps * DEG2RAD).T(-0.75f, 0, s * 2.0f).Then(wingFrame), world, surface, 0.3f);
         PartBetween({-0.1f, -0.45f, s * 0.55f}, {-0.2f, 0.9f, s * 2.7f}, 0.04f, world, surface);
+        }
         // Хвостовое оперение
+        if (mask & PM_TAIL) {
         Part(cube_, Xf().S(0.9f, 0.08f, 1.7f).T(0, 0, s * 0.85f).T(-4.85f, 0.3f, 0), world, body, 0.4f);
         Part(cube_, Xf().S(0.4f, 0.06f, 1.6f).T(-0.2f, 0, 0).RZ(-a.elevator).T(-5.3f, 0.3f, s * 0.85f), world, surface, 0.3f);
+        }
+        if (!B) continue;
         // Шасси (неубирающееся) с обтекателями колёс
         PartBetween({-0.25f, -0.55f, s * 0.4f}, {-0.3f, -0.78f, s * 1.15f}, 0.04f, world, surface);
         Part(sphere_, Xf().S(0.38f, 0.2f, 0.13f).T(-0.3f, -0.82f, s * 1.15f), world, body, 0.4f);
         Part(cylinder_, Xf().S(0.22f, 0.1f, 0.22f).T(0, -0.05f, 0).RX(PI / 2).T(-0.3f, -0.83f, s * 1.15f), world, tire, 0.1f);
     }
+    if (!B) return;
     Matrix finFrame = Xf().RZ(30.0f * DEG2RAD).T(-4.7f, 0.4f, 0.0f);
     Part(cube_, Xf().S(1.0f, 1.3f, 0.1f).T(0, 0.65f, 0).Then(finFrame), world, body, 0.4f);
     Part(cube_, Xf().S(0.4f, 1.15f, 0.08f).T(-0.2f, 0.6f, 0).RY(a.rudder).T(-0.5f, 0, 0).Then(finFrame), world, accent, 0.3f);
@@ -623,20 +645,24 @@ void Scene::DrawProp(const Aircraft& a, const Matrix& world, float time)
     (void)time;
 }
 
-void Scene::DrawAirliner(const Aircraft& a, const Matrix& world)
+void Scene::DrawAirliner(const Aircraft& a, const Matrix& world, int mask)
 {
     const Color body{240, 242, 246, 255}, belly{40, 70, 140, 255}, glass{28, 38, 54, 255};
     const Color wing{200, 204, 212, 255}, surface{176, 182, 192, 255}, dark{38, 40, 44, 255}, tire{25, 25, 25, 255};
+    const bool B = mask & PM_BODY;
 
+    if (B) {
     Part(cylinder_, Xf().S(2.0f, 28.0f, 2.0f).T(0, -14.0f, 0).RZ(-PI / 2), world, body, 0.5f);
     Part(sphere_, Xf().S(4.6f, 2.0f, 2.0f).T(14.0f, 0, 0), world, body, 0.5f);
     Part(sphere_, Xf().S(6.5f, 1.6f, 1.6f).T(-14.0f, 0.4f, 0), world, body, 0.5f);
     Part(cube_, Xf().S(27.0f, 0.9f, 4.03f).T(0, -1.25f, 0), world, belly, 0.4f);           // синее «брюхо»
     Part(cube_, Xf().S(25.0f, 0.28f, 4.04f).T(-0.5f, 0.55f, 0), world, glass, 0.8f);      // ряд окон
     Part(sphere_, Xf().S(1.6f, 0.55f, 1.5f).T(16.6f, 0.65f, 0), world, glass, 0.9f);     // окна кабины
+    }
 
     const Vector3 root{-1.0f, -1.3f, 0.0f};
     for (float s : {-1.0f, 1.0f}) {
+        if (WingOn(mask, s)) {
         Matrix wingFrame = Xf().RX(-s * 5.0f * DEG2RAD).RY(-s * 25.0f * DEG2RAD).T(root);
         Part(cube_, Xf().S(5.2f, 0.45f, 17.0f).T(0, 0, s * 8.5f).Then(wingFrame), world, wing, 0.4f);
         float ail = s > 0 ? -a.aileron : a.aileron;
@@ -651,11 +677,14 @@ void Scene::DrawAirliner(const Aircraft& a, const Matrix& world)
         Part(cube_, Xf().S(3.2f, 0.9f, 0.35f).T(1.0f, -1.45f, s * 5.75f), world, wing, 0.4f);
         if (a.reverser > 0.05f)
             Part(cylinder_, Xf().S(1.12f, 0.8f * a.reverser, 1.12f).T(0, -0.4f, 0).RZ(-PI / 2).T(0.6f, -2.2f, s * 5.75f), world, dark, 0.3f);
+        }
+        if (!(mask & PM_TAIL)) continue;
         // Стабилизатор
         Matrix stabFrame = Xf().RX(-s * 6.0f * DEG2RAD).RY(-s * 30.0f * DEG2RAD).T(-16.0f, 0.6f, 0.0f);
         Part(cube_, Xf().S(3.2f, 0.3f, 6.2f).T(0, 0, s * 3.1f).Then(stabFrame), world, wing, 0.4f);
         Part(cube_, Xf().S(1.0f, 0.18f, 5.6f).T(-0.5f, 0, 0).RZ(-a.elevator).T(-1.6f, 0, s * 3.1f).Then(stabFrame), world, surface, 0.3f);
     }
+    if (!B) return;
     Matrix finFrame = Xf().RZ(35.0f * DEG2RAD).T(-15.0f, 1.6f, 0.0f);
     Part(cube_, Xf().S(4.6f, 6.2f, 0.4f).T(0, 3.1f, 0).Then(finFrame), world, belly, 0.4f);
     Part(cube_, Xf().S(1.4f, 5.6f, 0.3f).T(-0.7f, 2.9f, 0).RY(a.rudder).T(-2.3f, 0, 0).Then(finFrame), world, belly, 0.3f);
@@ -674,14 +703,29 @@ void Scene::DrawAirliner(const Aircraft& a, const Matrix& world)
     }
 }
 
-void Scene::DrawAircraftModel(const Aircraft& a, float time)
+void Scene::DrawAircraftModel(const Aircraft& a, float time, bool self)
 {
     const AircraftType& t = a.Type();
     const Matrix world = MatrixMultiply(QuaternionToMatrix(a.rot), MatrixTranslate(a.pos.x, a.pos.y, a.pos.z));
-    switch (t.kind) {
-    case AircraftKind::Prop: DrawProp(a, world, time); break;
-    case AircraftKind::Airliner: DrawAirliner(a, world); break;
-    default: DrawLightJet(a, world); break;
+    auto drawParts = [&](const Matrix& m, int mask) {
+        switch (t.kind) {
+        case AircraftKind::Prop: DrawProp(a, m, time, mask); break;
+        case AircraftKind::Airliner: DrawAirliner(a, m, mask); break;
+        default: DrawLightJet(a, m, mask); break;
+        }
+    };
+    int mask = PM_BODY;
+    if (!a.lost[(int)Part::WingL]) mask |= PM_WING_L;
+    if (!a.lost[(int)Part::WingR]) mask |= PM_WING_R;
+    if (!a.lost[(int)Part::Tail]) mask |= PM_TAIL;
+    if (self) drawParts(world, mask);
+    // Оторванные части: та же геометрия, но со своим положением и вращением вокруг центра куска.
+    const int partMask[] = {PM_WING_L, PM_WING_R, PM_TAIL};
+    for (const Debris& d : a.debris) {
+        if (!d.active) continue;
+        Matrix m = MatrixMultiply(MatrixTranslate(-d.center.x, -d.center.y, -d.center.z),
+                                  MatrixMultiply(QuaternionToMatrix(d.rot), MatrixTranslate(d.pos.x, d.pos.y, d.pos.z)));
+        drawParts(m, partMask[(int)d.part]);
     }
 
     // Аэронавигационные огни, маячок, стробы и фары.
@@ -690,11 +734,13 @@ void Scene::DrawAircraftModel(const Aircraft& a, float time)
     Vector3 pl = a.ToWorld({wl.x + 0.2f, wl.y, wl.z - 0.05f}), pr = a.ToWorld({wr.x + 0.2f, wr.y, wr.z + 0.05f});
     Vector3 pt = a.ToWorld({tail.x - 0.9f, tail.y + 0.8f, 0});
     float k = t.span / 15.9f;
-    DrawSphere(pl, 0.16f * k, RED);
-    DrawSphere(pr, 0.16f * k, GREEN);
+    const bool hasL = !a.lost[(int)Part::WingL], hasR = !a.lost[(int)Part::WingR];
+    if (a.crashed || !self) return;
+    if (hasL) DrawSphere(pl, 0.16f * k, RED);
+    if (hasR) DrawSphere(pr, 0.16f * k, GREEN);
     DrawSphere(pt, 0.14f * k, WHITE);
-    Glow(pl, Color{255, 40, 40, 255}, 1.6f * k);
-    Glow(pr, Color{40, 255, 80, 255}, 1.6f * k);
+    if (hasL) Glow(pl, Color{255, 40, 40, 255}, 1.6f * k);
+    if (hasR) Glow(pr, Color{40, 255, 80, 255}, 1.6f * k);
     Glow(pt, Color{255, 255, 255, 200}, 1.4f * k);
     if (fmodf(time, 1.0f) < 0.12f) {
         Vector3 top = a.ToWorld({-0.5f * k, t.contacts[BELLY].y * -1.0f + 0.05f, 0});
@@ -703,8 +749,8 @@ void Scene::DrawAircraftModel(const Aircraft& a, float time)
     }
     float strobe = fmodf(time + 0.4f, 1.3f);
     if (strobe < 0.05f || (strobe > 0.12f && strobe < 0.17f)) {
-        Glow(pl, WHITE, 8.0f * k);
-        Glow(pr, WHITE, 8.0f * k);
+        if (hasL) Glow(pl, WHITE, 8.0f * k);
+        if (hasR) Glow(pr, WHITE, 8.0f * k);
     }
     if (a.gear > 0.99f) {   // посадочные фары на стойке/в крыле
         Vector3 ll = a.ToWorld({t.contacts[NOSE_WHEEL].x, t.contacts[NOSE_WHEEL].y + 0.6f, 0});
@@ -734,14 +780,15 @@ void Scene::DrawShadow(const Aircraft& a, const Terrain& t)
     };
     quad(proj(nose, -fw), proj(nose, fw), proj(tailX, fw * 0.7f), proj(tailX, -fw * 0.7f));
     for (float s : {-1.0f, 1.0f}) {
-        quad(proj(ch * 0.6f, 0), proj(ch * 0.4f - sweep, s * half), proj(-ch * 0.4f - sweep, s * half), proj(-ch * 0.7f, 0));
-        quad(proj(tailX + ch * 0.6f, 0), proj(tailX + ch * 0.1f, s * half * 0.38f), proj(tailX - ch * 0.4f, s * half * 0.38f), proj(tailX, 0));
+        if (!a.lost[s < 0 ? (int)Part::WingL : (int)Part::WingR])
+            quad(proj(ch * 0.6f, 0), proj(ch * 0.4f - sweep, s * half), proj(-ch * 0.4f - sweep, s * half), proj(-ch * 0.7f, 0));
+        if (!a.lost[(int)Part::Tail]) quad(proj(tailX + ch * 0.6f, 0), proj(tailX + ch * 0.1f, s * half * 0.38f), proj(tailX - ch * 0.4f, s * half * 0.38f), proj(tailX, 0));
     }
 }
 
 void Scene::DrawCrashFx(const Aircraft& a)
 {
-    if (crashAge < 0) return;
+    if (crashAge < 0 || !a.crashFire) return;
     float t = crashAge;
     float k = a.Type().span / 15.9f;
     for (int i = 0; i < 14; ++i) {
@@ -796,7 +843,7 @@ void Scene::Draw(const Aircraft& a, const Terrain& t, CamMode mode, float time, 
         for (const Vector3& p : scenery_.StreetLights())
             if (Vector3Distance(p, camera.position) < fminf(drawDist, 9000.0f)) Glow(p, Color{255, 200, 120, 200}, 4.0f, 0.0012f);
     for (int i = 0; i < world::AirportCount(); ++i) DrawAirport(i, time, wind);
-    if (showAircraft && mode != CamMode::Cockpit) DrawAircraftModel(a, time);
+    if (showAircraft) DrawAircraftModel(a, time, mode != CamMode::Cockpit);
     rlDrawRenderBatchActive();
     if (showAircraft) DrawShadow(a, t);
     rlDrawRenderBatchActive();

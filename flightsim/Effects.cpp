@@ -202,6 +202,21 @@ void Effects::Update(const Aircraft& a, const Environment& env, Vector3 wind, fl
             }
         }
     }
+    // Разрушение: из обломанного корня крыла хлещет топливо и дым, оторванная часть дымит, падая.
+    if (fireTimer_ > 0.03f) {
+        for (const Debris& d : a.debris) {
+            if (!d.active || d.burn <= 0.0f) continue;
+            float k = Clampf(d.burn / 25.0f, 0.2f, 1.0f);
+            if (!a.crashed) {
+                Vector3 root = a.ToWorld({d.center.x, d.center.y, d.center.z * 0.3f});
+                Vector3 v = Vector3Add(Vector3Scale(a.vel, 0.7f), {Rnd(-1, 1), Rnd(-1, 1), Rnd(-1, 1)});
+                Spawn(root, v, Rnd(2, 4), 1.8f * t.span / 15.9f, 4.0f, Color{235, 235, 235, (unsigned char)(200 * k)});
+                if (d.burn > 12.0f) Spawn(root, v, 0.5f, 1.0f, 2.0f, Color{255, (unsigned char)Rnd(100, 180), 30, 220});
+            }
+            Vector3 dv = Vector3Add(Vector3Scale(d.vel, 0.5f), {Rnd(-1, 1), Rnd(1, 3), Rnd(-1, 1)});
+            Spawn(d.pos, dv, Rnd(3, 6), 1.6f * t.span / 15.9f, 3.5f, Color{45, 42, 40, (unsigned char)(150 * k)});
+        }
+    }
     if (exhaustTimer_ > 0.05f) exhaustTimer_ = 0;
     if (fireTimer_ > 0.03f) fireTimer_ = 0;
 

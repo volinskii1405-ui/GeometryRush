@@ -5,7 +5,7 @@ class Terrain;
 
 // Сигнализация: GPWS/TAWS (земля), превышение скорости, крен, сваливание, отказы систем.
 enum class Alert { PullUp, Terrain, SinkRate, TooLowGear, BankAngle, Overspeed, Stall,
-                   EngFire, EngFail, GearUnsafe, FlapsJam, FuelLow, Count };
+                   EngFire, Structure, EngFail, GearUnsafe, FlapsJam, FuelLow, Overstress, Count };
 
 class WarningSystem {
 public:

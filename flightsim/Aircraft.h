@@ -24,6 +24,21 @@ struct Controls {
 
 enum class Failure { Engine1, Engine2, Fire1, Fire2, GearHydraulics, FlapsJam, FuelLeak, Count };
 
+// Части, которые могут оторваться: крылья и горизонтальное оперение.
+enum class Part { WingL, WingR, Tail, Count };
+
+// Оторвавшаяся часть летит сама по себе, кувыркаясь, пока не упадёт на землю.
+struct Debris {
+    bool active = false;
+    bool landed = false;
+    Part part = Part::WingL;
+    Vector3 center{};          // где была закреплена, связанные оси самолёта
+    Vector3 pos{}, vel{};      // мир
+    Quaternion rot{0, 0, 0, 1};
+    Vector3 omega{};           // рад/с, мир
+    float burn = 0;            // сколько ещё дымит топливо из разорванного бака, с
+};
+
 struct Engine {
     float n1 = 0;          // обороты, % (у винта — мощность)
     float thrust = 0;      // Н (отрицательная — реверс)
@@ -72,8 +87,19 @@ public:
     bool onGround = false;        // обжаты стойки шасси
     int wheelsOnGround = 0;
 
+    // ---- повреждения конструкции
+    bool lost[(int)Part::Count] = {};   // оторвалось
+    bool overstressed = false;   // превышена эксплуатационная перегрузка: остаточная деформация
+    float peakG = 1, minG = 1;   // максимальная и минимальная перегрузка за полёт
+    std::string damage;          // что и почему разрушилось (первое событие)
+    Debris debris[(int)Part::Count];
+    bool Broken() const { return lost[0] || lost[1] || lost[2]; }
+    float LimitG() const;        // эксплуатационная перегрузка (+); разрушающая — в 1.5 раза больше
+    float LimitNegG() const;
+
     // ---- события
     bool crashed = false;
+    bool crashFire = true;       // пожар после удара (при мягком ударе — просто остановился)
     std::string crashReason;
     bool touchdown = false;       // касание в этом кадре (сбрасывает вызывающий код)
     float touchdownFpm = 0;       // вертикальная скорость при касании
@@ -100,10 +126,14 @@ public:
     float SpeedLimitKt() const;   // текущее ограничение: VMO / VFE / VLE
 
 private:
-    void Crash(const std::string& reason);
+    void Crash(const std::string& reason, bool fire = true);
+    void Separate(Part p, const std::string& why);
+    void UpdateDebris(float dt, const Terrain& terrain);
     float EngineThrust(int i, float V, float rho, float dt, const Controls& c);
     const AircraftType* type_ = &GetAircraftType(AircraftKind::LightJet);
     bool wheelContact_[3] = {false, false, false};
     bool failures_[(int)Failure::Count] = {};
-    float stallDrop_ = 0;   // в какую сторону сваливается крыло при срыве
+    float stallDrop_ = 0;
+    float ultimateK_ = 1.5f;   // разрушающая / эксплуатационная (немного разная от полёта к полёту)
+    bool belly_ = false;       // скольжение на брюхе/крыле   // в какую сторону сваливается крыло при срыве
 };

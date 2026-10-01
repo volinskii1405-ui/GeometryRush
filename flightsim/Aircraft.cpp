@@ -78,7 +78,15 @@ void Aircraft::Reset(Vector3 position, float headingDeg, float speedMs, bool gro
     for (bool& w : wheelContact_) w = ground;
     for (bool& f : failures_) f = false;
     crashed = false;
+    crashFire = true;
     crashReason.clear();
+    for (bool& l : lost) l = false;
+    for (Debris& d : debris) d = Debris{};
+    overstressed = false;
+    peakG = minG = 1;
+    damage.clear();
+    belly_ = false;
+    ultimateK_ = 1.5f * (1.0f + 0.1f * (float)GetRandomValue(0, 100) / 100.0f);
     touchdown = false;
     touchdownFpm = 0;
     tailStrike = false;
@@ -163,11 +171,117 @@ Aircraft::Trim Aircraft::ComputeTrim(const AircraftType& t, float mass, float ta
     return Trim{alpha * RAD2DEG, Clampf(elevEff / trimRange, -1, 1), 0.5f * (lo + hi)};
 }
 
-void Aircraft::Crash(const std::string& reason)
+void Aircraft::Crash(const std::string& reason, bool fire)
 {
     if (crashed) return;
     crashed = true;
-    crashReason = reason;
+    crashFire = fire;
+    crashReason = damage.empty() ? reason : damage + ". " + reason;
+}
+
+float Aircraft::LimitG() const
+{
+    switch (type_->kind) {
+    case AircraftKind::Airliner: return 2.5f;   // транспортная категория
+    case AircraftKind::Prop: return 3.8f;       // нормальная категория
+    default: return 3.3f;
+    }
+}
+
+float Aircraft::LimitNegG() const
+{
+    switch (type_->kind) {
+    case AircraftKind::Airliner: return -1.0f;
+    case AircraftKind::Prop: return -1.52f;
+    default: return -1.3f;
+    }
+}
+
+// Где крепится часть (центр отрывающегося куска), связанные оси.
+static Vector3 PartCenter(AircraftKind k, Part p)
+{
+    float s = p == Part::WingL ? -1.0f : 1.0f;
+    switch (k) {
+    case AircraftKind::Prop:
+        return p == Part::Tail ? Vector3{-4.85f, 0.3f, 0} : Vector3{-0.3f, 0.95f, s * 2.75f};
+    case AircraftKind::Airliner:
+        return p == Part::Tail ? Vector3{-16.5f, 0.6f, 0} : Vector3{-3.0f, -1.6f, s * 8.5f};
+    default:
+        return p == Part::Tail ? Vector3{-7.5f, 3.42f, 0} : Vector3{-0.4f, -0.6f, s * 3.95f};
+    }
+}
+
+// Отрыв части конструкции. Самолёт не взрывается: он продолжает лететь (точнее, падать)
+// с тем, что осталось, а оторванная часть кувыркается отдельно.
+void Aircraft::Separate(Part p, const std::string& why)
+{
+    if (crashed || lost[(int)p]) return;
+    lost[(int)p] = true;
+    if (damage.empty()) damage = why;
+
+    const AircraftType& t = *type_;
+    Debris& d = debris[(int)p];
+    d = Debris{};
+    d.active = true;
+    d.part = p;
+    d.center = PartCenter(t.kind, p);
+    Vector3 r = Rotate(d.center, rot);
+    Vector3 omegaW = Rotate(omega, rot);
+    d.pos = Vector3Add(pos, r);
+    d.vel = Vector3Add(vel, Vector3CrossProduct(omegaW, r));
+    d.rot = rot;
+    float side = p == Part::WingL ? -1.0f : (p == Part::WingR ? 1.0f : 0.0f);
+    // Крыло складывается по направлению нагрузки и уходит назад потоком.
+    float load = Clampf(gLoad, -3.0f, 4.0f);
+    d.vel = Vector3Add(d.vel, Vector3Add(Vector3Scale(Up(), 2.0f * load), Vector3Scale(Right(), side * 2.5f)));
+    d.vel = Vector3Add(d.vel, Vector3Scale(Forward(), -4.0f));
+    Vector3 tumble{(float)GetRandomValue(-100, 100), (float)GetRandomValue(-100, 100), (float)GetRandomValue(-100, 100)};
+    d.omega = Vector3Add(omegaW, Vector3Scale(tumble, 0.03f));
+    d.omega = Vector3Add(d.omega, Vector3Scale(Forward(), -side * 2.5f * Sign(load)));
+    d.burn = p == Part::Tail ? 0.0f : 25.0f;
+
+    if (p != Part::Tail) {
+        // В крыле — топливные баки: половина топлива потеряна.
+        fuel *= 0.5f;
+        // Двигатели на крыле уходят вместе с ним.
+        for (int i = 0; i < t.engineCount; ++i)
+            if (t.enginePos[i].z * side > 1.0f && fabsf(t.enginePos[i].y) < 4.0f && t.kind == AircraftKind::Airliner) {
+                engines[i].failed = true;
+                engines[i].thrust = 0;
+                engines[i].n1 = 0;
+            }
+    }
+}
+
+void Aircraft::UpdateDebris(float dt, const Terrain& terrain)
+{
+    for (Debris& d : debris) {
+        if (!d.active) continue;
+        d.burn = fmaxf(d.burn - dt, 0.0f);
+        if (d.landed) continue;
+        // Плоский кусок крыла быстро тормозится воздухом (установившаяся скорость ~40 м/с).
+        float v = Vector3Length(d.vel);
+        Vector3 drag = Vector3Scale(d.vel, -0.006f * v);
+        d.vel = Vector3Add(d.vel, Vector3Scale(Vector3Add(drag, {0, -G, 0}), dt));
+        d.pos = Vector3Add(d.pos, Vector3Scale(d.vel, dt));
+        float w = Vector3Length(d.omega);
+        if (w > 1e-4f) {
+            Quaternion dq = QuaternionFromAxisAngle(Vector3Scale(d.omega, 1.0f / w), w * dt);
+            d.rot = QuaternionNormalize(QuaternionMultiply(dq, d.rot));
+        }
+        float ground = terrain.SurfaceHeight(d.pos.x, d.pos.z);
+        if (terrain.IsWater(d.pos.x, d.pos.z)) ground -= 1.5f;   // тонет
+        if (d.pos.y < ground + 0.3f) {
+            d.pos.y = ground + 0.3f;
+            // Ложится плашмя.
+            Vector3 up = Rotate({0, 1, 0}, d.rot);
+            Quaternion flat = QuaternionFromVector3ToVector3(up, up.y >= 0 ? Vector3{0, 1, 0} : Vector3{0, -1, 0});
+            d.rot = QuaternionNormalize(QuaternionMultiply(flat, d.rot));
+            d.vel = {};
+            d.omega = {};
+            d.landed = true;
+        }
+    }
 }
 
 float Aircraft::EngineThrust(int i, float V, float rho, float dt, const Controls& c)
@@ -212,6 +326,7 @@ float Aircraft::EngineThrust(int i, float V, float rho, float dt, const Controls
 void Aircraft::Step(float dt, const Controls& c, const Terrain& terrain, Vector3 wind)
 {
     const AircraftType& t = *type_;
+    UpdateDebris(dt, terrain);
     if (crashed) {
         // Обломки падают баллистически до земли и там остаются.
         float ground = terrain.SurfaceHeight(pos.x, pos.z) + 1.0f;
@@ -274,8 +389,15 @@ void Aircraft::Step(float dt, const Controls& c, const Terrain& terrain, Vector3
         Tb.y += t.enginePos[i].z * th;
         Tb.z += -t.thrustLineY * th;
         if (engines[i].fireTime > 120.0f) {
-            Crash(L("Engine fire spread to the wing", "Пожар двигателя перекинулся на крыло"));
-            return;
+            // Огонь прожигает конструкцию рядом с двигателем.
+            if (t.kind == AircraftKind::Prop) {
+                Crash(L("Engine fire spread to the cabin", "Пожар двигателя перекинулся в кабину"));
+                return;
+            }
+            Part burnt = t.kind == AircraftKind::Airliner ? (t.enginePos[i].z < 0 ? Part::WingL : Part::WingR) : Part::Tail;
+            Separate(burnt, t.kind == AircraftKind::Airliner
+                                ? L("Engine fire burned through the wing", "Пожар двигателя прожёг крыло — крыло отломилось")
+                                : L("Engine fire burned through the tail", "Пожар двигателя прожёг хвост — оперение отломилось"));
         }
     }
     if (failures_[(int)Failure::FuelLeak]) fuelFlow += t.maxFuel * 0.004f;
@@ -317,18 +439,34 @@ void Aircraft::Step(float dt, const Controls& c, const Terrain& terrain, Vector3
     // Сваливание: демпфирование крена пропадает (сваливание на крыло, вход в штопор).
     if (stall > 0.3f && stallDrop_ == 0.0f) stallDrop_ = (GetRandomValue(0, 1) ? 1.0f : -1.0f);
     if (stall < 0.05f) stallDrop_ = 0.0f;
-    float clRoll = -0.09f * beta + t.clAileron * aileron - t.clp * (1.0f - 1.4f * stall) * ph + 0.12f * rh
-                 + 0.035f * stall * stallDrop_;
-    float cm = t.cm0 - t.cmAlpha * sinf(alpha) + t.cmElev * elevEff - t.cmq * qh - t.cmFlaps * ff - 0.12f * stall;
+    // Повреждения: оторванное крыло не создаёт подъёмной силы, оставшееся переворачивает самолёт.
+    const float wl = lost[(int)Part::WingL] ? 0.0f : 1.0f, wr = lost[(int)Part::WingR] ? 0.0f : 1.0f;
+    const float wings = 0.5f * (wl + wr);
+    const bool tailGone = lost[(int)Part::Tail];
+
+    float clRoll = -0.09f * beta + wings * (t.clAileron * aileron - t.clp * (1.0f - 1.4f * stall) * ph) + 0.12f * rh
+                 + 0.035f * stall * stallDrop_ * wings;
+    float cm = tailGone
+        // Без стабилизатора самолёт статически неустойчив и резко опускает нос.
+        ? t.cm0 - 0.12f + 0.4f * t.cmAlpha * sinf(alpha) - 0.1f * t.cmq * qh - t.cmFlaps * ff
+        : t.cm0 - t.cmAlpha * sinf(alpha) + t.cmElev * elevEff - t.cmq * qh - t.cmFlaps * ff - 0.12f * stall;
     float cn = t.cnBeta * beta + t.cnRudder * rudder - t.cnr * rh - 0.03f * ph - 0.012f * aileron;
 
     if (V > 0.1f) {
         Vector3 vxy{vb.x, vb.y, 0};
         if (Vector3Length(vxy) > 0.01f) {
             Vector3 liftDir = Vector3Normalize(Vector3CrossProduct({0, 0, 1}, vxy));
-            Fb = Vector3Add(Fb, Vector3Scale(liftDir, qd * t.wingArea * cl));
+            Fb = Vector3Add(Fb, Vector3Scale(liftDir, qd * t.wingArea * cl * (0.06f + 0.94f * wings)));
         }
         Fb = Vector3Add(Fb, Vector3Scale(vb, -qd * t.wingArea * cd / V));
+        if (wl != wr) {
+            // Подъёмная сила и сопротивление одного крыла приложены сбоку от фюзеляжа.
+            float arm = t.span * 0.22f;
+            float wingLift = qd * t.wingArea * cl * 0.47f;
+            float wingDrag = qd * t.wingArea * cd * 0.4f;
+            Tb.x += arm * wingLift * (wl - wr);
+            Tb.y += -arm * wingDrag * (wr - wl);
+        }
         Fb.z += qd * t.wingArea * cy;
         Tb.x += qd * t.wingArea * t.span * clRoll;
         Tb.y += -qd * t.wingArea * t.span * cn;
@@ -349,6 +487,10 @@ void Aircraft::Step(float dt, const Controls& c, const Terrain& terrain, Vector3
     int wheels = 0;
     for (int k = 0; k < CONTACT_COUNT; ++k) {
         bool isWheel = k <= RIGHT_MAIN;
+        if (k == WING_L && lost[(int)Part::WingL]) continue;
+        if (k == WING_R && lost[(int)Part::WingR]) continue;
+        if (t.kind == AircraftKind::Airliner && ((k == ENGINE_L && lost[(int)Part::WingL]) || (k == ENGINE_R && lost[(int)Part::WingR])))
+            continue;
         if (isWheel && gear < 0.98f) {
             wheelContact_[k] = false;
             continue;
@@ -370,15 +512,54 @@ void Aircraft::Step(float dt, const Controls& c, const Terrain& terrain, Vector3
             Crash(V > 40.0f ? L("Impact with the sea", "Удар о воду") : L("Ditched in the sea", "Приводнение в море"));
             return;
         }
-        if (!isWheel && k != TAIL) {
+        bool skid = false;   // контакт без разрушения: скольжение с трением
+        const float impact = Vector3Length(vel);
+        if (k == WING_L || k == WING_R) {
+            if (groundSpeed > 12.0f || vn < -3.0f) {
+                // Крыло цепляет землю и отламывается; самолёт разворачивает в сторону удара.
+                float side = k == WING_L ? -1.0f : 1.0f;
+                Separate(k == WING_L ? Part::WingL : Part::WingR,
+                         k == WING_L ? L("Left wing hit the ground and broke off", "Левое крыло задело землю и отломилось")
+                                     : L("Right wing hit the ground and broke off", "Правое крыло задело землю и отломилось"));
+                vel = Vector3Scale(vel, 0.88f);
+                omega.y -= side * 0.5f;
+                omega.x *= 0.5f;
+                continue;
+            }
+            skid = true;
+        } else if (k == ENGINE_L || k == ENGINE_R) {
+            // Удар винтом/гондолой: двигатель разрушен, но это ещё не катастрофа.
+            if (vn < -6.0f && t.kind == AircraftKind::Airliner) {
+                Separate(k == ENGINE_L ? Part::WingL : Part::WingR,
+                         L("Engine pod hit the ground, wing torn off", "Двигатель ударился о землю и оторвал крыло"));
+                continue;
+            }
+            int e = t.engineCount > 1 ? k - ENGINE_L : 0;
+            if (!engines[e].failed) {
+                Fail(e == 0 ? Failure::Engine1 : Failure::Engine2);
+                if (damage.empty())
+                    damage = t.jet ? L("Engine pod strike", "Удар гондолой двигателя") : L("Propeller strike — engine stopped", "Удар винтом — двигатель остановился");
+            }
+            skid = true;
+        } else if (k == BELLY || k == NOSE_CONE) {
+            // Мягкое касание фюзеляжем — посадка на брюхо, самолёт скользит; жёсткое — катастрофа.
+            if (vn > -3.0f && impact < 75.0f) {
+                skid = true;
+                belly_ = true;
+                if (damage.empty())
+                    damage = gear < 0.98f ? L("Belly landing — gear not down", "Посадка на брюхо — шасси не выпущено")
+                                          : L("Fuselage scraped the ground", "Фюзеляж задел землю");
+            }
+        }
+        if (!isWheel && k != TAIL && !skid) {
             char buf[160];
             const char* what = k == BELLY ? (gear < 0.98f ? L("Gear-up belly impact", "Посадка на брюхо — шасси не выпущено")
                                                           : L("Fuselage impact", "Удар фюзеляжем"))
                              : k == NOSE_CONE ? L("Nose impact", "Удар носом")
                              : (k == WING_L || k == WING_R) ? L("Wingtip strike", "Удар законцовкой крыла")
                              : (t.jet ? L("Engine pod strike", "Удар гондолой двигателя") : L("Propeller strike", "Удар винтом о землю"));
-            snprintf(buf, sizeof buf, "%s: %.0f kt, %.0f fpm", what, Vector3Length(vel) * MS_TO_KT, vn * MS_TO_FPM);
-            Crash(buf);
+            snprintf(buf, sizeof buf, "%s: %.0f kt, %.0f fpm", what, impact * MS_TO_KT, vn * MS_TO_FPM);
+            Crash(buf, impact > 20.0f || vn < -6.0f);
             return;
         }
         if (k == TAIL) {
@@ -406,8 +587,9 @@ void Aircraft::Step(float dt, const Controls& c, const Terrain& terrain, Vector3
             ++wheels;
         }
 
-        float kSpring = k == NOSE_WHEEL ? t.springNose : (k == TAIL ? t.springMain * 2.0f : t.springMain);
-        float cDamp = k == NOSE_WHEEL ? t.dampNose : (k == TAIL ? t.dampMain * 1.6f : t.dampMain);
+        bool hard = k == TAIL || skid;   // жёсткий контакт: хвостовая пята, фюзеляж, законцовка
+        float kSpring = k == NOSE_WHEEL ? t.springNose : (hard ? t.springMain * 2.0f : t.springMain);
+        float cDamp = k == NOSE_WHEEL ? t.dampNose : (hard ? t.dampMain * 1.6f : t.dampMain);
         float fn = fmaxf(kSpring * depth - cDamp * vn, 0.0f);
 
         // Направление качения колеса в плоскости грунта.
@@ -422,8 +604,8 @@ void Aircraft::Step(float dt, const Controls& c, const Terrain& terrain, Vector3
 
         float muRoll = 0.015f;
         if (k == LEFT_MAIN || k == RIGHT_MAIN) muRoll += 0.55f * (c.parkingBrake ? 1.0f : Clampf(c.brakes, 0, 1));
-        float muSide = k == TAIL ? 0.5f : 0.8f;
-        if (k == TAIL) muRoll = 0.5f;
+        float muSide = hard ? 0.5f : 0.8f;
+        if (hard) muRoll = 0.5f;
         float fl = -muRoll * fn * tanhf(vl / 0.3f);
         float fs = -muSide * fn * tanhf(vs / 0.4f);
 
@@ -433,6 +615,13 @@ void Aircraft::Step(float dt, const Controls& c, const Terrain& terrain, Vector3
     }
     wheelsOnGround = wheels;
     onGround = wheels > 0;
+    // Повреждённый самолёт остановился на земле — полёт окончен, но без взрыва.
+    if ((belly_ || Broken() || damage.size()) && Vector3Length(vel) < 0.8f && (onGround || belly_)
+        && pos.y - terrain.SurfaceHeight(pos.x, pos.z) < t.restHeight + 1.0f) {
+        Crash(L("The aircraft came to a stop. It is damaged, but everyone survived",
+                "Самолёт остановился. Он повреждён, но все живы"), false);
+        return;
+    }
 
     // ------------------------------------------------ интегрирование
     Vector3 acc = Vector3Scale(Fw, 1.0f / mass);
@@ -461,12 +650,24 @@ void Aircraft::Step(float dt, const Controls& c, const Terrain& terrain, Vector3
     rot = QuaternionNormalize(rot);
 
     // ------------------------------------------------ прочность
-    const float gMax = t.kind == AircraftKind::Airliner ? 4.0f : 6.0f;
-    if (gLoad > gMax || gLoad < -2.0f - (gMax - 4.0f) * 0.5f) {
-        char buf[96];
-        snprintf(buf, sizeof buf, L("Structural failure: overstress %.1f G", "Разрушение конструкции: перегрузка %.1f G"), gLoad);
-        Crash(buf);
-    } else if (ias * MS_TO_KT > t.vmo + 90.0f) {
-        Crash(L("Structural failure: flutter (overspeed)", "Разрушение конструкции: флаттер (превышение скорости)"));
+    // Выше эксплуатационной перегрузки — остаточная деформация (самолёт летит, но его надо осматривать).
+    // В 1.5 раза выше (разрушающая) — крыло отламывается. Самолёт при этом не взрывается, а падает.
+    if (wheelsOnGround == 0 && !belly_) {
+        peakG = fmaxf(peakG, gLoad);
+        minG = fminf(minG, gLoad);
+        if (gLoad > LimitG() || gLoad < LimitNegG()) overstressed = true;
+        if (gLoad > LimitG() * ultimateK_ || gLoad < LimitNegG() * ultimateK_) {
+            // Ломается более нагруженное крыло: при крене с перегрузкой — поднимающееся.
+            Part w = omega.x > 0.05f ? Part::WingL : omega.x < -0.05f ? Part::WingR : (GetRandomValue(0, 1) ? Part::WingL : Part::WingR);
+            if (lost[(int)w]) w = w == Part::WingL ? Part::WingR : Part::WingL;
+            char buf[160];
+            snprintf(buf, sizeof buf,
+                     w == Part::WingL ? L("Left wing failed under %.1f G (limit %.1f G)", "Левое крыло сломалось от перегрузки %.1f G (предел %.1f G)")
+                                      : L("Right wing failed under %.1f G (limit %.1f G)", "Правое крыло сломалось от перегрузки %.1f G (предел %.1f G)"),
+                     gLoad, gLoad > 0 ? LimitG() : LimitNegG());
+            Separate(w, buf);
+        }
     }
+    if (ias * MS_TO_KT > t.vmo + 90.0f && !lost[(int)Part::Tail])
+        Separate(Part::Tail, L("Flutter: the tailplane broke off (overspeed)", "Флаттер: оторвало стабилизатор (превышение скорости)"));
 }

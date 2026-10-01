@@ -108,6 +108,10 @@ void Autopilot::Update(const Aircraft& a, float raFt, Controls& c, float dt)
         apOn = athrOn = false;
         return;
     }
+    if (a.Broken()) {
+        DisconnectAp(ui::L("AP OFF: STRUCTURAL DAMAGE", "АВТОПИЛОТ ОТКЛ: РАЗРУШЕНИЕ КОНСТРУКЦИИ"));
+        athrOn = false;
+    }
     apOffTimer = fmaxf(apOffTimer - dt, 0.0f);
 
     const float hdg = a.HeadingDeg(), pitch = a.PitchDeg(), bank = a.BankDeg();

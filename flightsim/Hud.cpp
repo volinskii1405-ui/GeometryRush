@@ -493,6 +493,16 @@ void DrawEcam(const Aircraft& a, float x, float y, float w)
     const AircraftType& t = a.Type();
     struct Msg { std::string title, action; Color c; };
     std::vector<Msg> msgs;
+    if (a.lost[(int)Part::WingL] || a.lost[(int)Part::WingR])
+        msgs.push_back({a.lost[(int)Part::WingL] && a.lost[(int)Part::WingR] ? "WINGS LOST"
+                        : a.lost[(int)Part::WingL] ? "L WING LOST" : "R WING LOST",
+                        L("Aircraft uncontrollable", "Самолёт неуправляем"), kRed});
+    if (a.lost[(int)Part::Tail])
+        msgs.push_back({"STABILIZER LOST", L("No pitch control", "Нет управления по тангажу"), kRed});
+    if (a.overstressed && !a.Broken())
+        msgs.push_back({"OVERSTRESS", TextFormat(L("%.1f G (limit %.1f / %.1f G): structure damaged, land", "%.1f G (предел %.1f / %.1f G): конструкция повреждена, садитесь"),
+                                                 a.peakG > -a.minG * a.LimitG() / -a.LimitNegG() ? a.peakG : a.minG, a.LimitG(), a.LimitNegG()),
+                        kAmber});
     for (int i = 0; i < t.engineCount; ++i) {
         const Engine& e = a.engines[i];
         std::string eng = t.engineCount > 1 ? TextFormat("ENG %d", i + 1) : "ENGINE";
@@ -608,8 +618,9 @@ void DrawAlerts(const WarningSystem& w, float time)
     TextC("MASTER CAUTION", bx + 260 * S, by + 10 * S, 12, caut ? BLACK : Color{120, 100, 50, 255});
 
     // Активные сигналы по приоритету
-    const Alert order[] = {Alert::PullUp, Alert::EngFire, Alert::Overspeed, Alert::Stall, Alert::Terrain, Alert::SinkRate,
-                           Alert::TooLowGear, Alert::BankAngle, Alert::EngFail, Alert::GearUnsafe, Alert::FuelLow, Alert::FlapsJam};
+    const Alert order[] = {Alert::Structure, Alert::PullUp, Alert::EngFire, Alert::Overspeed, Alert::Stall, Alert::Terrain, Alert::SinkRate,
+                           Alert::TooLowGear, Alert::BankAngle, Alert::EngFail, Alert::GearUnsafe, Alert::FuelLow, Alert::FlapsJam,
+                           Alert::Overstress};
     float y = 92 * S;
     bool first = true;
     for (Alert a : order) {
