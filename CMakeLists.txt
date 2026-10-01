@@ -29,6 +29,9 @@ if(MSVC)
 else()
     target_compile_options(raylib PRIVATE -w)
 endif()
+# Заголовки raylib (в том числе raymath.h) подключаем как системные — без их предупреждений.
+set_target_properties(raylib PROPERTIES
+    INTERFACE_SYSTEM_INCLUDE_DIRECTORIES $<TARGET_PROPERTY:raylib,INTERFACE_INCLUDE_DIRECTORIES>)
 
 # ---------------------------------------------------------------- игра
 set(GAME_CORE_SOURCES
@@ -69,6 +72,29 @@ add_custom_command(TARGET GeometryRush POST_BUILD
             ${CMAKE_CURRENT_SOURCE_DIR}/levels
             $<TARGET_FILE_DIR:GeometryRush>/levels
     COMMENT "Copying levels")
+
+# ---------------------------------------------------------------- авиасимулятор
+add_executable(FlightSim
+    flightsim/main.cpp
+    flightsim/Aircraft.cpp
+    flightsim/Terrain.cpp
+    flightsim/Warnings.cpp
+    flightsim/Audio.cpp
+    flightsim/Scene.cpp
+    flightsim/Hud.cpp
+)
+target_include_directories(FlightSim PRIVATE flightsim)
+target_link_libraries(FlightSim PRIVATE raylib)
+if(MSVC)
+    target_compile_options(FlightSim PRIVATE /W4 /utf-8)
+    set_target_properties(FlightSim PROPERTIES
+        LINK_FLAGS_RELEASE "/SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup")
+else()
+    target_compile_options(FlightSim PRIVATE -Wall -Wextra)
+endif()
+if(APPLE)
+    target_link_libraries(FlightSim PRIVATE "-framework IOKit" "-framework Cocoa" "-framework OpenGL")
+endif()
 
 # ---------------------------------------------------------------- инструменты
 if(GEOMETRY_RUSH_BUILD_TOOLS)
