@@ -4,6 +4,8 @@
 class Aircraft;
 class WarningSystem;
 class Terrain;
+class Autopilot;
+class CalloutSystem;
 struct Controls;
 
 struct HudInfo {
@@ -19,6 +21,8 @@ struct HudInfo {
     float lastTouchdownFpm = 0;
     float touchdownMsgTimer = 0;
     float touchdownCenterline = 0;
+    const Autopilot* ap = nullptr;
+    const CalloutSystem* callouts = nullptr;
 };
 
 void DrawHud(const Aircraft& a, const Controls& c, const WarningSystem& w, const Terrain& t,

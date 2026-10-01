@@ -111,3 +111,97 @@ void WarningSystem::Update(const Aircraft& a, const Terrain& t, float dt)
         if (a.crashed) active_[i] = false;
     }
 }
+
+// ---------------------------------------------------------------- отсчёт высоты
+
+namespace {
+const float kCalloutFt[] = {1000, 500, 200, 100, 50, 40, 30, 20, 10};
+}
+
+void CalloutSystem::Reset()
+{
+    for (bool& b : armed_) b = false;
+    queueLen_ = 0;
+    shown = Callout::Count;
+    showTimer = 0;
+    retardTimer_ = 0;
+}
+
+const char* CalloutSystem::Text(Callout c)
+{
+    switch (c) {
+    case Callout::C1000: return "1000";
+    case Callout::C500: return "500";
+    case Callout::Minimums: return "MINIMUMS";
+    case Callout::C100: return "100";
+    case Callout::C50: return "50";
+    case Callout::C40: return "40";
+    case Callout::C30: return "30";
+    case Callout::C20: return "20";
+    case Callout::C10: return "10";
+    case Callout::Retard: return "RETARD";
+    default: return "";
+    }
+}
+
+const char* CalloutSystem::FileName(Callout c)
+{
+    switch (c) {
+    case Callout::C1000: return "callout_1000.ogg";
+    case Callout::C500: return "callout_500.ogg";
+    case Callout::Minimums: return "minimums.ogg";
+    case Callout::C100: return "callout_100.ogg";
+    case Callout::C50: return "callout_50.ogg";
+    case Callout::C40: return "callout_40.ogg";
+    case Callout::C30: return "callout_30.ogg";
+    case Callout::C20: return "callout_20.ogg";
+    case Callout::C10: return "callout_10.ogg";
+    case Callout::Retard: return "retard.ogg";
+    default: return "";
+    }
+}
+
+void CalloutSystem::Push(Callout c)
+{
+    if (queueLen_ < 4) queue_[queueLen_++] = c;
+    shown = c;
+    showTimer = 1.2f;
+}
+
+Callout CalloutSystem::Pop()
+{
+    if (queueLen_ == 0) return Callout::Count;
+    Callout c = queue_[0];
+    for (int i = 1; i < queueLen_; ++i) queue_[i - 1] = queue_[i];
+    --queueLen_;
+    return c;
+}
+
+void CalloutSystem::Update(const Aircraft& a, float raFt, float throttle, float dt)
+{
+    showTimer = fmaxf(showTimer - dt, 0.0f);
+    retardTimer_ = fmaxf(retardTimer_ - dt, 0.0f);
+    if (a.crashed) {
+        queueLen_ = 0;
+        return;
+    }
+    // Отсчёт идёт только при снижении с выпущенным шасси.
+    const bool active = !a.onGround && a.gear > 0.99f && a.vel.y < -0.5f;
+    for (int i = 0; i < 9; ++i) {
+        float th = kCalloutFt[i];
+        if (raFt > th * 1.1f + 20.0f) armed_[i] = true;
+        if (armed_[i] && raFt <= th) {
+            armed_[i] = false;
+            if (active) {
+                // Если самолёт быстро проходит несколько отметок, говорим только последнюю.
+                queueLen_ = 0;
+                Push((Callout)i);
+            }
+        }
+    }
+    // «Retard» — пора убрать газ: ниже 20 ft, а РУД не на малом газе.
+    if (active && raFt < 20.0f && throttle > 0.05f && retardTimer_ <= 0.0f) {
+        Push(Callout::Retard);
+        retardTimer_ = 1.5f;
+    }
+}

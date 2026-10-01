@@ -4,6 +4,7 @@
 
 #include "Aircraft.h"
 #include "Audio.h"
+#include "Autopilot.h"
 #include "Hud.h"
 #include "Scene.h"
 #include "Terrain.h"
@@ -33,6 +34,8 @@ struct Sim {
     Scene scene;
     Aircraft aircraft;
     WarningSystem warnings;
+    CalloutSystem callouts;
+    Autopilot ap;
     AudioSystem audio;
     Controls ctl;
 
@@ -115,6 +118,14 @@ void StartScenario(Sim& s, int which)
     }
     s.ctl = c;
     s.warnings.Reset();
+    s.callouts.Reset();
+    {   // Задатчики автопилота/директора под сценарий
+        const Aircraft& a = s.aircraft;
+        float altFt = roundf(a.pos.y * M_TO_FT / 100.0f) * 100.0f;
+        if (s.scenario == 1) s.ap.Reset(90.0f, 3000.0f, 180.0f, true, false);
+        else if (s.scenario == 2) s.ap.Reset(90.0f, 2000.0f, 135.0f, false, true);
+        else s.ap.Reset(a.HeadingDeg(), altFt, 220.0f, false, false);
+    }
     s.scene.ResetCamera(s.aircraft);
     s.accumulator = 0;
     s.crashAge = -1;
@@ -181,7 +192,21 @@ void HandleInput(Sim& s, float dt)
     }
     if (kPitch != 0 || kRoll != 0 || kYaw != 0) s.gamepad = false;
 
-    if (s.gamepad) {
+    // ---- автопилот: любое заметное движение штурвала отключает его (как усилие на штурвале)
+    if (s.ap.apOn) {
+        bool manual = kPitch != 0 || kRoll != 0 || (s.gamepad && (fabsf(gp) > 0.3f || fabsf(gr) > 0.3f));
+        if (s.mouseYoke && !s.gamepad) {
+            Vector2 m = GetMousePosition();
+            float range = GetScreenHeight() * 0.3f;
+            manual = manual || fabsf(m.y - GetScreenHeight() * 0.4f) > range * 0.6f ||
+                     fabsf(m.x - GetScreenWidth() * 0.5f) > range * 0.6f;
+        }
+        if (manual) s.ap.DisconnectAp("AP OFF");
+    }
+
+    if (s.ap.apOn) {
+        c.yaw = KeyStick(c.yaw, kYaw, dt);   // штурвалом и триммером управляет автопилот
+    } else if (s.gamepad) {
         c.pitch = gp;
         c.roll = gr;
         c.yaw = gy;
@@ -202,14 +227,30 @@ void HandleInput(Sim& s, float dt)
     float thr = down(KEY_LEFT_SHIFT) + down(KEY_RIGHT_SHIFT) + down(KEY_PAGE_UP)
               - down(KEY_LEFT_CONTROL) - down(KEY_RIGHT_CONTROL) - down(KEY_PAGE_DOWN);
     if (padAvail) thr -= Axis(0, GAMEPAD_AXIS_RIGHT_Y) * 1.5f;
+    if (s.ap.athrOn && (thr != 0 || IsKeyPressed(KEY_Z) || IsKeyPressed(KEY_X))) s.ap.DisconnectAthr();
     c.throttle = Clampf(c.throttle + Clampf(thr, -1.5f, 1.5f) * 0.45f * dt, 0, 1);
     if (IsKeyPressed(KEY_Z)) c.throttle = 0.0f;
     if (IsKeyPressed(KEY_X)) c.throttle = 1.0f;
+
+    // ---- автопилот: включение режимов и задатчики (удержание клавиши — быстрее)
+    float ra = s.warnings.radioAltFt;
+    if (IsKeyPressed(KEY_T)) s.ap.ToggleAp(s.aircraft, ra);
+    if (IsKeyPressed(KEY_Y)) s.ap.ToggleAthr(s.aircraft);
+    if (IsKeyPressed(KEY_L)) s.ap.ToggleApp();
+    if (IsKeyPressed(KEY_O)) s.ap.fdOn = !s.ap.fdOn;
+    auto step = [](int key) { return IsKeyPressed(key) || IsKeyPressedRepeat(key); };
+    if (step(KEY_NINE)) s.ap.hdgBug = WrapDeg360(s.ap.hdgBug - 1.0f);
+    if (step(KEY_ZERO)) s.ap.hdgBug = WrapDeg360(s.ap.hdgBug + 1.0f);
+    if (step(KEY_MINUS)) s.ap.altTarget = fmaxf(s.ap.altTarget - 100.0f, 0.0f);
+    if (step(KEY_EQUAL)) s.ap.altTarget = fminf(s.ap.altTarget + 100.0f, 20000.0f);
+    if (step(KEY_COMMA)) s.ap.spdTarget = fmaxf(s.ap.spdTarget - 5.0f, 100.0f);
+    if (step(KEY_PERIOD)) s.ap.spdTarget = fminf(s.ap.spdTarget + 5.0f, 300.0f);
 
     // ---- триммер
     float trim = down(KEY_RIGHT_BRACKET) + down(KEY_HOME) - down(KEY_LEFT_BRACKET) - down(KEY_END);
     if (padAvail) trim += (IsGamepadButtonDown(0, GAMEPAD_BUTTON_LEFT_FACE_UP) ? 1.0f : 0.0f)
                         - (IsGamepadButtonDown(0, GAMEPAD_BUTTON_LEFT_FACE_DOWN) ? 1.0f : 0.0f);
+    if (trim != 0 && s.ap.apOn) s.ap.DisconnectAp("AP OFF");   // ручной триммер отключает AP
     c.trim = Clampf(c.trim + Clampf(trim, -1, 1) * 0.25f * dt, -1, 1);
 
     // ---- механизация, шасси, тормоза
@@ -261,6 +302,7 @@ int main()
             s.accumulator += dt;
             bool wasCrashed = s.aircraft.crashed;
             while (s.accumulator >= PHYSICS_DT) {
+                s.ap.Update(s.aircraft, s.warnings.radioAltFt, s.ctl, PHYSICS_DT);
                 s.aircraft.Step(PHYSICS_DT, s.ctl, s.terrain, WindAt(s, s.aircraft.pos));
                 s.accumulator -= PHYSICS_DT;
             }
@@ -278,8 +320,13 @@ int main()
             if (s.crashAge >= 0) s.crashAge += dt;
             s.touchdownTimer = fmaxf(s.touchdownTimer - dt, 0.0f);
             s.warnings.Update(s.aircraft, s.terrain, dt);
+            s.callouts.Update(s.aircraft, s.warnings.radioAltFt, s.ctl.throttle, dt);
         }
-        s.audio.Update(s.aircraft, s.warnings, s.paused);
+        if (s.ap.apOffSound) {
+            s.ap.apOffSound = false;
+            s.audio.PlayApDisconnect();
+        }
+        s.audio.Update(s.aircraft, s.warnings, s.callouts, s.paused);
         s.scene.crashAge = s.crashAge;
         s.scene.UpdateCamera(s.aircraft, s.cam, dt);
 
@@ -300,6 +347,8 @@ int main()
         info.lastTouchdownFpm = s.touchdownFpm;
         info.touchdownMsgTimer = s.touchdownTimer;
         info.touchdownCenterline = s.touchdownCl;
+        info.ap = &s.ap;
+        info.callouts = &s.callouts;
         DrawHud(s.aircraft, s.ctl, s.warnings, s.terrain, s.scene.camera, info);
         DrawFPS(GetScreenWidth() - 90, GetScreenHeight() - 20);
         EndDrawing();

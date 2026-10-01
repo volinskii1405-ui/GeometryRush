@@ -2,6 +2,8 @@
 #include "Aircraft.h"
 #include "Terrain.h"
 #include "Warnings.h"
+#include "Ils.h"
+#include "Autopilot.h"
 
 #include <cstdio>
 
@@ -10,6 +12,7 @@ using namespace fs;
 namespace {
 
 float S = 1.0f;   // масштаб интерфейса (высота окна / 900)
+const Autopilot* g_ap = nullptr;   // автопилот/директор текущего кадра
 int Fs(float px) { return (int)(px * S + 0.5f); }
 
 const Color kPanel{14, 16, 20, 225};
@@ -55,40 +58,6 @@ Vector2 Rot(Vector2 v, float deg)
 }
 
 bool Blink(float time, float hz = 2.0f) { return fmodf(time * hz, 1.0f) < 0.6f; }
-
-// ---------------------------------------------------------------- ILS
-struct Ils {
-    bool valid = false;
-    const char* name = "";
-    float locDots = 0, gsDots = 0, dmeNm = 0;
-    bool gsValid = false;
-};
-
-Ils ComputeIls(const Aircraft& a)
-{
-    Ils ils;
-    const float L = Terrain::kRunwayHalfLen;
-    bool rwy09 = fabsf(WrapDeg180(a.HeadingDeg() - 90.0f)) < 90.0f;
-    float dir = rwy09 ? 1.0f : -1.0f;              // направление посадки вдоль X
-    ils.name = rwy09 ? "ILS 09" : "ILS 27";
-    float xLoc = dir * (L + 300.0f);               // курсовой маяк — за дальним торцом
-    float xGs = -dir * (L - 300.0f);               // глиссадный — у зоны приземления
-    float along = (xLoc - a.pos.x) * dir;
-    float lateral = a.pos.z * dir;                 // + — правее оси
-    if (along < 0 || along > 35000.0f) return ils;
-    float locAngle = atan2f(lateral, along) * RAD2DEG;
-    if (fabsf(locAngle) > 35.0f) return ils;
-    ils.valid = true;
-    ils.locDots = Clampf(locAngle / 1.25f, -2.5f, 2.5f);
-    float dg = (xGs - a.pos.x) * dir;
-    float h = a.pos.y - 1.75f - Terrain::kAirportElev;
-    ils.dmeNm = sqrtf(dg * dg + a.pos.z * a.pos.z) / 1852.0f;
-    if (dg > 150.0f) {
-        ils.gsValid = true;
-        ils.gsDots = Clampf((atan2f(h, dg) * RAD2DEG - 3.0f) / 0.35f, -2.5f, 2.5f);
-    }
-    return ils;
-}
 
 // ---------------------------------------------------------------- PFD
 
@@ -150,6 +119,17 @@ void DrawAttitude(const Aircraft& a, const WarningSystem& w, const Ils& ils, flo
     DrawRectangle((int)(cx + 26 * S), (int)(cy - 2 * S), (int)(43 * S), (int)(4 * S), sym);
     DrawRectangle((int)(cx - 4 * S), (int)(cy - 4 * S), (int)(8 * S), (int)(8 * S), BLACK);
     DrawRectangle((int)(cx - 3 * S), (int)(cy - 3 * S), (int)(6 * S), (int)(6 * S), sym);
+
+    // Планки директора: горизонтальная — куда поставить нос, вертикальная — куда кренить.
+    // Совмести жёлтый силуэт с перекрестием — и летишь по выбранному режиму.
+    if (g_ap && g_ap->fdOn && !a.crashed) {
+        float py = cy - Clampf((g_ap->fdPitch - pitch) * ppd, -half * 0.8f, half * 0.8f);
+        float bx = cx + Clampf((g_ap->fdBank - bank) * 2.5f * S, -half * 0.6f, half * 0.6f);
+        DrawLineEx({cx - 60 * S, py}, {cx + 60 * S, py}, 4.0f * S, BLACK);
+        DrawLineEx({cx - 60 * S, py}, {cx + 60 * S, py}, 2.5f * S, kMagenta);
+        DrawLineEx({bx, cy - 60 * S}, {bx, cy + 60 * S}, 4.0f * S, BLACK);
+        DrawLineEx({bx, cy - 60 * S}, {bx, cy + 60 * S}, 2.5f * S, kMagenta);
+    }
 
     // ILS: ромбы курса (снизу) и глиссады (справа).
     if (ils.valid) {
@@ -218,6 +198,10 @@ void DrawSpeedTape(const Aircraft& a, float x, float cy, float wdt, float hgt, f
             TextR(buf, x + wdt - 24 * S, y - 7 * S, 14, WHITE);
         }
     }
+    if (g_ap) {   // заданная скорость
+        float ty = Clampf(Y(g_ap->spdTarget), top + 4 * S, top + hgt - 4 * S);
+        DrawTriangle({x + wdt - 1 * S, ty}, {x + wdt + 7 * S, ty + 6 * S}, {x + wdt + 7 * S, ty - 6 * S}, kCyan);
+    }
     // Тренд скорости через 10 с.
     if (fabsf(trendKt) > 2.0f) {
         float y1 = Y(ias + trendKt);
@@ -233,8 +217,9 @@ void DrawSpeedTape(const Aircraft& a, float x, float cy, float wdt, float hgt, f
     TextR(buf, x + wdt - 18 * S, cy - 9 * S, 20, sc);
     DrawTriangle({x + wdt - 12 * S, cy - 6 * S}, {x + wdt - 12 * S, cy + 6 * S}, {x + wdt - 4 * S, cy}, WHITE);
 
-    snprintf(buf, sizeof buf, "IAS kt");
-    TextC(buf, x + wdt * 0.5f, top - 16 * S, 12, kCyan);
+    if (g_ap) snprintf(buf, sizeof buf, "SPD %d", (int)g_ap->spdTarget);
+    else snprintf(buf, sizeof buf, "IAS kt");
+    TextC(buf, x + wdt * 0.5f, top - 16 * S, 13, kCyan);
     if (a.mach > 0.35f) {
         snprintf(buf, sizeof buf, "M .%03d", (int)(a.mach * 1000.0f));
         TextC(buf, x + wdt * 0.5f, top + hgt + 4 * S, 14, WHITE);
@@ -258,6 +243,10 @@ void DrawAltTape(const Aircraft& a, const Terrain& t, float x, float cy, float w
         for (float yy = gy; yy < top + hgt; yy += 8 * S)
             DrawLineEx({x + 10 * S, yy}, {x + 20 * S, yy + 8 * S}, 1.5f, kAmber);
     }
+    if (g_ap) {   // заданная высота
+        float ty = Clampf(Y(g_ap->altTarget), top + 6 * S, top + hgt - 6 * S);
+        DrawRectangle((int)x, (int)(ty - 6 * S), (int)(7 * S), (int)(12 * S), kCyan);
+    }
     for (int k = ((int)(alt - 500) / 100) * 100; k <= alt + 500; k += 100) {
         float y = Y((float)k);
         bool major = k % 500 == 0;
@@ -276,7 +265,8 @@ void DrawAltTape(const Aircraft& a, const Terrain& t, float x, float cy, float w
     DrawRectangleLinesEx({x + 4 * S, cy - 13 * S, wdt - 6 * S, 26 * S}, 1.5f, WHITE);
     DrawTriangle({x + 4 * S, cy}, {x + 12 * S, cy + 6 * S}, {x + 12 * S, cy - 6 * S}, WHITE);
     TextR(buf, x + wdt - 6 * S, cy - 9 * S, 20, WHITE);
-    TextC("ALT ft", x + wdt * 0.5f, top - 16 * S, 12, kCyan);
+    if (g_ap) TextC(TextFormat("ALT %d", (int)g_ap->altTarget), x + wdt * 0.5f, top - 16 * S, 13, kCyan);
+    else TextC("ALT ft", x + wdt * 0.5f, top - 16 * S, 12, kCyan);
 }
 
 void DrawVsi(const Aircraft& a, float x, float cy, float wdt, float hgt)
@@ -332,6 +322,11 @@ void DrawHeadingTape(const Aircraft& a, float cx, float y, float wdt, float hgt)
             else snprintf(buf, sizeof buf, "%02d", dd / 10);
             TextC(lbl, x, y + 10 * S, 12, WHITE);
         }
+    }
+    if (g_ap) {   // заданный курс
+        float bx = cx + Clampf(WrapDeg180(g_ap->hdgBug - hdg) * ppd, -wdt * 0.5f + 5 * S, wdt * 0.5f - 5 * S);
+        DrawRectangle((int)(bx - 5 * S), (int)y, (int)(10 * S), (int)(5 * S), kCyan);
+        DrawRectangle((int)(bx - 2 * S), (int)y, (int)(4 * S), (int)(9 * S), kCyan);
     }
     // Путевой угол (куда реально движемся) — зелёный ромб.
     if (sqrtf(a.vel.x * a.vel.x + a.vel.z * a.vel.z) > 5.0f) {
@@ -563,7 +558,7 @@ void DrawAlerts(const WarningSystem& w, float time)
     // Активные сигналы по приоритету
     const Alert order[] = {Alert::PullUp, Alert::Overspeed, Alert::Stall, Alert::Terrain,
                            Alert::SinkRate, Alert::TooLowGear, Alert::BankAngle};
-    float y = 80 * S;
+    float y = 92 * S;
     bool first = true;
     for (Alert a : order) {
         if (!w.Active(a)) continue;
@@ -591,11 +586,51 @@ void Overlay(const char* title, Color tc, const char* const* lines, int n)
 
 } // namespace
 
+// Строка режимов автопилота (FMA): зелёным — активные режимы, голубым — взведённые.
+void DrawFma(float x, float y)
+{
+    if (!g_ap) return;
+    const Autopilot& ap = *g_ap;
+    const float h = 22 * S;
+    float cx = x;
+    auto box = [&](const char* main, Color mc, const char* armed, float w) {
+        DrawRectangle((int)cx, (int)y, (int)w, (int)h, Color{0, 0, 0, 190});
+        DrawRectangleLinesEx({cx, y, w, h}, 1.0f, Color{70, 74, 82, 255});
+        Text(main, cx + 6 * S, y + 5 * S, 13, mc);
+        if (armed) TextR(armed, cx + w - 6 * S, y + 5 * S, 12, kCyan);
+        cx += w + 3 * S;
+    };
+    const char* thr = ap.athrOn ? (ap.retard ? "RETARD" : "SPEED") : "MAN THR";
+    box(TextFormat("A/THR %s", thr), ap.athrOn ? kGreen : Color{150, 150, 150, 255}, nullptr, 150 * S);
+    const char* latArmed = (ap.appArmed && !ap.locCaptured) ? "LOC" : nullptr;
+    box(ap.lat == Autopilot::Lat::Loc ? "LOC" : TextFormat("HDG %03d", (int)ap.hdgBug % 360), kGreen, latArmed, 110 * S);
+    const char* vertArmed = ((ap.appArmed || ap.locCaptured) && !ap.gsCaptured) ? "G/S" : nullptr;
+    const char* vert = ap.vert == Autopilot::Vert::Gs ? "G/S" : (ap.vert == Autopilot::Vert::TakeOff ? "TO" : TextFormat("ALT %d", (int)ap.altTarget));
+    box(vert, kGreen, vertArmed, 120 * S);
+    box(ap.apOn ? "AP" : "AP OFF", ap.apOn ? kGreen : Color{150, 150, 150, 255}, ap.fdOn ? "FD" : nullptr, 90 * S);
+}
+
+void DrawApAndCallouts(const CalloutSystem* callouts, float time)
+{
+    const int sw = GetScreenWidth(), sh = GetScreenHeight();
+    if (g_ap && g_ap->apOffTimer > 0.0f && Blink(time, 3.0f)) {
+        const char* msg = g_ap->apOffReason[0] ? g_ap->apOffReason : "AP OFF";
+        TextOutlined(msg, sw * 0.5f, 62 * S, Fs(22), kRed);
+    }
+    if (callouts && callouts->showTimer > 0.0f && callouts->shown != Callout::Count) {
+        Color c = callouts->shown == Callout::Retard ? kAmber : WHITE;
+        unsigned char alpha = (unsigned char)(255 * Clampf(callouts->showTimer / 0.4f, 0, 1));
+        c.a = alpha;
+        TextOutlined(CalloutSystem::Text(callouts->shown), sw * 0.5f, sh * 0.42f, Fs(40), c);
+    }
+}
+
 void DrawHud(const Aircraft& a, const Controls& c, const WarningSystem& w, const Terrain& t,
              const Camera3D& cam, const HudInfo& info)
 {
     const int sw = GetScreenWidth(), sh = GetScreenHeight();
     S = fminf(sh / 900.0f, sw / 1500.0f);
+    g_ap = info.ap;
     if (S < 0.5f) S = 0.5f;
 
     static float prevIas = 0, trend = 0;
@@ -629,6 +664,7 @@ void DrawHud(const Aircraft& a, const Controls& c, const WarningSystem& w, const
     DrawAltTape(a, t, attCx + A * 0.5f + 8 * S, cy, 80 * S, A);
     DrawVsi(a, attCx + A * 0.5f + 92 * S, cy, 26 * S, A * 0.9f);
     DrawHeadingTape(a, attCx, cy + A * 0.5f + 28 * S, A, 24 * S);
+    DrawFma(px, panelTop - 28 * S);
 
     // Двигатель, механизация, шасси
     float sysX = attCx + A * 0.5f + 140 * S;
@@ -650,7 +686,7 @@ void DrawHud(const Aircraft& a, const Controls& c, const WarningSystem& w, const
         Text(buf, ix, panelTop + 112 * S, 13, Color{150, 154, 160, 255});
         snprintf(buf, sizeof buf, "VS %d kt (stall, current flaps)", (int)a.StallSpeedKt());
         Text(buf, ix, panelTop + 130 * S, 13, Color{150, 154, 160, 255});
-        Text("F1 - help    Esc - pause    R - restart", ix, panelTop + panelH - 30 * S, 13, Color{150, 154, 160, 255});
+        Text("T - autopilot   Y - auto thr   L - ILS   F1 - help", ix, panelTop + panelH - 30 * S, 13, Color{150, 154, 160, 255});
         if (a.tailStrike) Text("TAIL STRIKE!", ix, panelTop + 156 * S, 18, kAmber);
     }
 
@@ -659,10 +695,11 @@ void DrawHud(const Aircraft& a, const Controls& c, const WarningSystem& w, const
         float fpm = -info.lastTouchdownFpm;
         const char* rating = fpm < 120 ? "BUTTER" : fpm < 300 ? "SMOOTH" : fpm < 600 ? "FIRM" : "HARD";
         snprintf(buf, sizeof buf, "TOUCHDOWN %.0f fpm - %s   centerline %.1f m", -fpm, rating, info.touchdownCenterline);
-        TextOutlined(buf, sw * 0.5f, panelTop - 48 * S, Fs(24), fpm < 600 ? kGreen : kAmber);
+        TextOutlined(buf, sw * 0.5f, panelTop - 62 * S, Fs(24), fpm < 600 ? kGreen : kAmber);
     }
 
     DrawAlerts(w, info.time);
+    DrawApAndCallouts(info.callouts, info.time);
 
     if (a.crashed) {
         const char* lines[] = {a.crashReason.c_str(), "", "R - try again", "1 - runway   2 - ILS approach   3 - mountains"};
@@ -677,10 +714,15 @@ void DrawHud(const Aircraft& a, const Controls& c, const WarningSystem& w, const
             "Speed brake:  /  or  K                  Camera:  C,  mouse to look",
             "Wind:  F8     Pause:  Esc     Restart:  R     Scenarios:  1 2 3",
             "",
+            "Autopilot:  T - AP on/off   Y - auto throttle   L - ILS approach   O - FD",
+            "Set:  9 / 0 - heading   - / = - altitude   , / . - speed",
+            "Magenta cross on PFD = Flight Director: put the yellow wings on it.",
+            "Stick/trim input disconnects AP. On ILS it drops off at 150 ft - flare yourself.",
+            "",
             "Takeoff: P (park brake off), flaps 10, X (full power), rotate at ~110 kt,",
             "positive climb - gear up, flaps up above 150 kt. Final: flaps 35, gear down, ~120 kt.",
         };
-        Overlay("CONTROLS", kCyan, lines, 10);
+        Overlay("CONTROLS", kCyan, lines, 15);
     } else if (info.paused) {
         const char* lines[] = {"Esc - continue", "1 - takeoff from runway 09", "2 - ILS approach runway 09 (10 nm final)",
                                "3 - low level through the mountains", "F1 - controls", "Q (while paused) - quit"};

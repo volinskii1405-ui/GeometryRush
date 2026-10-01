@@ -79,6 +79,7 @@ add_executable(FlightSim
     flightsim/Aircraft.cpp
     flightsim/Terrain.cpp
     flightsim/Warnings.cpp
+    flightsim/Autopilot.cpp
     flightsim/Audio.cpp
     flightsim/Scene.cpp
     flightsim/Hud.cpp

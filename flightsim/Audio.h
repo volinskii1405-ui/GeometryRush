@@ -12,7 +12,8 @@ class AudioSystem {
 public:
     void Init();
     void Shutdown();
-    void Update(const Aircraft& a, const WarningSystem& w, bool paused);
+    void Update(const Aircraft& a, const WarningSystem& w, CalloutSystem& callouts, bool paused);
+    void PlayApDisconnect();
     void PlayCrash();
     void PlayTouchdown(float strength);
     void PlayClick();
@@ -23,7 +24,9 @@ private:
     bool ready_ = false;
     AudioStream engine_{};
     Sound alerts_[(int)Alert::Count] = {};
-    Sound crash_{}, touchdown_{}, click_{};
+    Sound crash_{}, touchdown_{}, click_{}, apOff_{};
+    Sound callouts_[(int)Callout::Count] = {};
+    int playingCallout_ = -1;
     Alert lastVoice_ = Alert::Count;
 
     // состояние синтезатора

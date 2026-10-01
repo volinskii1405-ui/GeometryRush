@@ -138,6 +138,28 @@ void AudioSystem::Init()
         click_ = MakeSound(b);
     }
 
+    {   // отключение автопилота: «кавалерийский горн» (быстрое арпеджио)
+        auto b = Buffer(1.6f);
+        const float notes[] = {784, 1047, 1319, 1568};
+        for (int rep = 0; rep < 2; ++rep)
+            for (int k = 0; k < 4; ++k) Tone(b, rep * 0.75f + k * 0.11f, k == 3 ? 0.3f : 0.1f, notes[k], notes[k], 0.35f, 1.2f);
+        apOff_ = MakeSound(b);
+    }
+    // Отсчёт высоты: без записанного голоса — короткий сигнал, у «Minimums» и «Retard» свои.
+    for (int i = 0; i < (int)Callout::Count; ++i) {
+        auto b = Buffer(0.4f);
+        if ((Callout)i == Callout::Minimums) {
+            Tone(b, 0.0f, 0.15f, 1100, 1100, 0.4f, 1.0f);
+            Tone(b, 0.18f, 0.2f, 1470, 1470, 0.4f, 1.0f);
+        } else if ((Callout)i == Callout::Retard) {
+            Tone(b, 0.0f, 0.12f, 520, 520, 0.45f);
+            Tone(b, 0.16f, 0.12f, 520, 520, 0.45f);
+        } else {
+            Tone(b, 0.0f, 0.08f, 1500, 1500, 0.25f, 1.0f);
+        }
+        callouts_[i] = MakeSound(b);
+    }
+
     // Записанные сигналы из папки sounds/ рядом с программой заменяют синтезированные.
     // Если файла нет — остаётся синтезированный тон.
     struct File { Alert alert; const char* name; };
@@ -155,6 +177,16 @@ void AudioSystem::Init()
         UnloadSound(alerts_[(int)f.alert]);
         alerts_[(int)f.alert] = snd;
     }
+    auto loadFile = [](const char* name, Sound& target) {
+        const char* path = TextFormat("%ssounds/%s", GetApplicationDirectory(), name);
+        if (!FileExists(path)) return;
+        Sound snd = LoadSound(path);
+        if (snd.frameCount == 0) return;
+        UnloadSound(target);
+        target = snd;
+    };
+    for (int i = 0; i < (int)Callout::Count; ++i) loadFile(CalloutSystem::FileName((Callout)i), callouts_[i]);
+    loadFile("ap_disconnect.ogg", apOff_);
 }
 
 void AudioSystem::Shutdown()
@@ -165,6 +197,8 @@ void AudioSystem::Shutdown()
     UnloadSound(crash_);
     UnloadSound(touchdown_);
     UnloadSound(click_);
+    UnloadSound(apOff_);
+    for (Sound& snd : callouts_) UnloadSound(snd);
     CloseAudioDevice();
     ready_ = false;
 }
@@ -203,7 +237,7 @@ void AudioSystem::FillEngine(short* out, int frames, const Aircraft& a, bool pau
     }
 }
 
-void AudioSystem::Update(const Aircraft& a, const WarningSystem& w, bool paused)
+void AudioSystem::Update(const Aircraft& a, const WarningSystem& w, CalloutSystem& callouts, bool paused)
 {
     if (!ready_) return;
 
@@ -217,6 +251,14 @@ void AudioSystem::Update(const Aircraft& a, const WarningSystem& w, bool paused)
     if (voice != lastVoice_ && lastVoice_ != Alert::Count) StopSound(alerts_[(int)lastVoice_]);
     if (voice != Alert::Count && !IsSoundPlaying(alerts_[(int)voice])) PlaySound(alerts_[(int)voice]);
     lastVoice_ = voice;
+
+    // Отсчёт высоты: новое сообщение прерывает предыдущее; во время голоса GPWS — молчим.
+    for (Callout cl = callouts.Pop(); cl != Callout::Count; cl = callouts.Pop()) {
+        if (paused || voice != Alert::Count) continue;
+        if (playingCallout_ >= 0) StopSound(callouts_[playingCallout_]);
+        playingCallout_ = (int)cl;
+        PlaySound(callouts_[playingCallout_]);
+    }
 
     for (Alert s : {Alert::Overspeed, Alert::Stall}) {
         Sound& snd = alerts_[(int)s];
@@ -240,6 +282,11 @@ void AudioSystem::PlayTouchdown(float strength)
     if (!ready_) return;
     SetSoundVolume(touchdown_, fs::Clampf(strength, 0.15f, 1.0f));
     PlaySound(touchdown_);
+}
+
+void AudioSystem::PlayApDisconnect()
+{
+    if (ready_) PlaySound(apOff_);
 }
 
 void AudioSystem::PlayClick()
