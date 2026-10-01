@@ -262,7 +262,7 @@ void CalloutSystem::Update(const Aircraft& a, float raFt, const Controls& c, flo
             Push(Callout::PositiveClimb);
         }
         if (posClimb_) posClimbTime_ += dt;
-        if (posClimb_ && !gearUp_ && !c.gearDown && posClimbTime_ > 0.8f) {
+        if (posClimb_ && !gearUp_ && !c.gearDown && posClimbTime_ > 1.6f) {   // после «Positive climb» целиком
             gearUp_ = true;
             Push(Callout::GearUp);
         }
