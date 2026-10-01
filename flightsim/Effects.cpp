@@ -1,5 +1,6 @@
 #include "Effects.h"
 #include "Aircraft.h"
+#include "World.h"
 
 #include "rlgl.h"
 
@@ -112,6 +113,7 @@ Color Mul(Color c, Vector3 k, float a = 1.0f)
 
 void Effects::Init()
 {
+    AddRunwayRubber();
     soft_ = MakeSoftTexture();
     cloudTex_ = MakeCloudTexture();
     layer_ = MakeLayerMesh();
@@ -159,7 +161,83 @@ void Effects::SetEnvironment(const Environment& env)
     }
 }
 
-void Effects::Clear() { particles_.clear(); }
+void Effects::Clear()
+{
+    particles_.clear();
+    flatTrail_[0] = flatTrail_[1] = false;
+}
+
+// ---------------------------------------------------------------- следы шин
+
+constexpr float kMarkLift = 0.42f;   // над уровнем полосы: асфальт и разметка — на 0.3…0.36 м выше грунта
+
+Vector3 Effects::MarkPoint(Vector3 wheel)
+{
+    int ap = world::NearestAirport(wheel.x, wheel.z);
+    const Runway& rw = world::GetAirport(ap).rwy;
+    if (rw.Contains(wheel.x, wheel.z, 5.0f)) return {wheel.x, rw.center.y + kMarkLift, wheel.z};
+    return {wheel.x, wheel.y + 0.06f, wheel.z};
+}
+
+void Effects::AddSkid(Vector3 a, Vector3 b, float w, unsigned char alpha)
+{
+    if (skids_.size() > 5000) skids_.erase(skids_.begin(), skids_.begin() + 500);
+    skids_.push_back({a, b, w, alpha});
+}
+
+// В зоне приземления настоящей полосы — тысячи чёрных полос резины от прошлых посадок.
+void Effects::AddRunwayRubber()
+{
+    for (int i = 0; i < world::AirportCount(); ++i) {
+        const Runway& rw = world::GetAirport(i).rwy;
+        const bool big = rw.halfLen > 1000.0f;
+        for (int end = 0; end < 2; ++end) {
+            Vector3 d = rw.Dir(end), right{-d.z, 0, d.x};
+            Vector3 thr = rw.Threshold(end);
+            const int count = big ? 260 : 60;
+            for (int k = 0; k < count; ++k) {
+                // Касание обычно в 250–600 м от порога (у короткой полосы — ближе), колея 3.5–8 м.
+                float along = big ? Rnd(200.0f, 750.0f) : Rnd(70.0f, 330.0f);
+                float track = Rnd(1.6f, big ? 4.0f : 2.4f);
+                float side = (Rnd() < 0.5f ? -1.0f : 1.0f) * track + Rnd(-1.5f, 1.5f);
+                float len = Rnd(8.0f, 45.0f);
+                Vector3 p = Vector3Add(Vector3Add(thr, Vector3Scale(d, along)), Vector3Scale(right, side));
+                p.y = rw.center.y + kMarkLift;
+                Vector3 q = Vector3Add(p, Vector3Add(Vector3Scale(d, len), Vector3Scale(right, Rnd(-0.6f, 0.6f))));
+                AddSkid(p, q, Rnd(0.35f, 0.9f), (unsigned char)Rnd(25, 85));
+            }
+            // Общий налёт резины по оси.
+            for (int k = 0; k < 6; ++k) {
+                float along = (big ? 250.0f : 90.0f) + k * (big ? 90.0f : 40.0f);
+                Vector3 p = Vector3Add(thr, Vector3Scale(d, along));
+                p.y = rw.center.y + kMarkLift - 0.01f;
+                AddSkid(p, Vector3Add(p, Vector3Scale(d, big ? 100.0f : 45.0f)), big ? 12.0f : 7.0f, 22);
+            }
+        }
+    }
+}
+
+void Effects::DrawSkidMarks(const Camera3D& cam, float maxDist) const
+{
+    rlDisableDepthMask();
+    rlDisableBackfaceCulling();
+    for (const Skid& s : skids_) {
+        float dist = Vector3Distance(s.a, cam.position);
+        if (dist > maxDist) continue;
+        Vector3 dir = Vector3Subtract(s.b, s.a);
+        Vector3 side = Vector3Normalize(Vector3CrossProduct(dir, {0, 1, 0}));
+        side = Vector3Scale(side, s.w * 0.5f);
+        // Шейдер тумана сюда не применяется — гасим следы с расстоянием сами.
+        Color c{18, 18, 18, (unsigned char)(s.alpha * (1.0f - dist / maxDist))};
+        Vector3 p0 = Vector3Add(s.a, side), p1 = Vector3Subtract(s.a, side);
+        Vector3 p2 = Vector3Subtract(s.b, side), p3 = Vector3Add(s.b, side);
+        DrawTriangle3D(p0, p1, p2, c);
+        DrawTriangle3D(p0, p2, p3, c);
+    }
+    rlDrawRenderBatchActive();
+    rlEnableBackfaceCulling();
+    rlEnableDepthMask();
+}
 
 void Effects::Spawn(Vector3 p, Vector3 v, float life, float size, float grow, Color c)
 {
@@ -170,6 +248,31 @@ void Effects::Spawn(Vector3 p, Vector3 v, float life, float size, float grow, Co
 void Effects::Update(const Aircraft& a, const Environment& env, Vector3 wind, float dt, bool touchdown)
 {
     const AircraftType& t = a.Type();
+    // Следы на полосе: при касании колёса за доли секунды раскручиваются, оставляя чёрную полосу резины.
+    const float tireW = 0.3f * t.span / 15.9f;
+    if (touchdown && !a.crashed) {
+        Vector3 hv{a.vel.x, 0, a.vel.z};
+        float gs = Vector3Length(hv);
+        if (gs > 15.0f)
+            for (int k : {LEFT_MAIN, RIGHT_MAIN}) {
+                Vector3 p = MarkPoint(a.ToWorld(t.contacts[k]));
+                Vector3 q = Vector3Add(p, Vector3Scale(hv, 0.3f));
+                AddSkid(p, q, tireW, (unsigned char)Clampf(gs * 2.0f, 60.0f, 170.0f));
+            }
+    }
+    // Спущенная шина: обод оставляет непрерывный след.
+    for (int i = 0; i < 2; ++i) {
+        bool on = a.tireFlat[i] && a.onGround && !a.crashed;
+        Vector3 p = on ? MarkPoint(a.ToWorld(t.contacts[LEFT_MAIN + i])) : Vector3{};
+        if (on && flatTrail_[i] && Vector3Distance(p, flatLast_[i]) > 1.5f) {
+            AddSkid(flatLast_[i], p, tireW * 0.8f, 150);
+            flatLast_[i] = p;
+        } else if (on && !flatTrail_[i]) {
+            flatLast_[i] = p;
+        }
+        flatTrail_[i] = on;
+    }
+
     // Дым из-под колёс в момент касания: резина разгоняется до скорости самолёта.
     if (touchdown && !a.crashed) {
         float strength = Clampf(Vector3Length(a.vel) / 60.0f, 0.3f, 1.0f);

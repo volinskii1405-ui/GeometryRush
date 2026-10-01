@@ -163,6 +163,57 @@ void AudioSystem::Init()
             for (int k = 0; k < 4; ++k) Tone(b, rep * 0.75f + k * 0.11f, k == 3 ? 0.3f : 0.1f, notes[k], notes[k], 0.35f, 1.2f);
         apOff_ = MakeSound(b);
     }
+    {   // стук шасси о замки: глухой удар и металлический лязг
+        auto b = Buffer(0.5f);
+        float lp = 0;
+        for (size_t i = 0; i < b.size(); ++i) {
+            float t = (float)i / RATE;
+            lp += 0.08f * (Noise() - lp);
+            b[i] = 0.9f * sinf(2 * PI * 55 * t) * expf(-t * 11.0f) + 1.6f * lp * expf(-t * 25.0f)
+                 + 0.12f * sinf(2 * PI * 910 * t) * sinf(2 * PI * 1370 * t) * expf(-t * 18.0f);
+        }
+        gearThump_ = MakeSound(b);
+    }
+    {   // гидравлика шасси: вой насоса (целое число периодов — петля без щелчка)
+        auto b = Buffer(1.0f);
+        float lp = 0;
+        for (size_t i = 0; i < b.size(); ++i) {
+            float t = (float)i / RATE;
+            lp += 0.2f * (Noise() - lp);
+            b[i] = 0.10f * sinf(2 * PI * 420 * t) + 0.05f * sinf(2 * PI * 840 * t) + 0.12f * lp;
+        }
+        gearMotor_ = MakeSound(b);
+    }
+    {   // электромотор закрылков: жужжание
+        auto b = Buffer(1.0f);
+        for (size_t i = 0; i < b.size(); ++i) {
+            float t = (float)i / RATE;
+            b[i] = 0.10f * tanhf(4.0f * sinf(2 * PI * 190 * t)) + 0.05f * sinf(2 * PI * 380 * t) + 0.03f * Noise();
+        }
+        flapMotor_ = MakeSound(b);
+    }
+    {   // щелчок колеса триммера
+        auto b = Buffer(0.05f);
+        for (size_t i = 0; i < b.size(); ++i) {
+            float t = (float)i / RATE;
+            b[i] = (0.6f * Noise() + 0.5f * sinf(2 * PI * 2300 * t)) * expf(-t * 160.0f);
+        }
+        trimTick_ = MakeSound(b);
+    }
+    {   // визг шин при касании: резина раскручивается до скорости самолёта
+        auto b = Buffer(0.6f);
+        float lp1 = 0, lp2 = 0;
+        for (size_t i = 0; i < b.size(); ++i) {
+            float t = (float)i / RATE;
+            float n = Noise();
+            lp1 += 0.45f * (n - lp1);
+            lp2 += 0.12f * (n - lp2);
+            float env = fminf(t / 0.01f, 1.0f) * expf(-t * 7.0f);
+            b[i] = env * (1.4f * (lp1 - lp2) + 0.18f * sinf(2 * PI * (1900.0f - 500.0f * t) * t));
+        }
+        screech_ = MakeSound(b);
+    }
+
     // Отсчёт высоты: без записанного голоса — короткий сигнал, у «Minimums» и «Retard» свои.
     for (int i = 0; i < (int)Callout::Count; ++i) {
         auto b = Buffer(0.4f);
@@ -216,6 +267,7 @@ void AudioSystem::Shutdown()
     UnloadSound(crash_);
     UnloadSound(touchdown_);
     UnloadSound(click_);
+    for (Sound* snd : {&gearThump_, &gearMotor_, &flapMotor_, &trimTick_, &screech_}) UnloadSound(*snd);
     UnloadSound(apOff_);
     UnloadSound(chime_);
     for (Sound& snd : callouts_) UnloadSound(snd);
@@ -257,9 +309,39 @@ void AudioSystem::FillEngine(short* out, int frames, const Aircraft& a, bool pau
     }
 }
 
-void AudioSystem::Update(const Aircraft& a, const WarningSystem& w, CalloutSystem& callouts, bool paused)
+void AudioSystem::Update(const Aircraft& a, const Controls& c, const WarningSystem& w, CalloutSystem& callouts, bool paused)
 {
     if (!ready_) return;
+
+    // Механика: насос шасси и мотор закрылков звучат, пока они движутся; удар — когда шасси встало на замок.
+    {
+        bool live = !paused && !a.crashed && prevGear_ >= 0.0f;
+        bool gearMoving = live && fabsf(a.gear - prevGear_) > 1e-6f;
+        if (gearMoving && !IsSoundPlaying(gearMotor_)) PlaySound(gearMotor_);
+        if (!gearMoving && IsSoundPlaying(gearMotor_)) StopSound(gearMotor_);
+        if (live) {
+            bool locked = a.gear <= 0.0f || a.gear >= 1.0f;
+            bool wasLocked = prevGear_ <= 0.0f || prevGear_ >= 1.0f;
+            if (locked != wasLocked) {
+                SetSoundVolume(gearThump_, locked ? 1.0f : 0.45f);   // встало на замок / сошло с замка
+                PlaySound(gearThump_);
+            }
+        }
+        bool flapsMoving = live && fabsf(a.flaps - prevFlaps_) > 1e-5f;
+        if (flapsMoving && !IsSoundPlaying(flapMotor_)) PlaySound(flapMotor_);
+        if (!flapsMoving && IsSoundPlaying(flapMotor_)) StopSound(flapMotor_);
+        prevGear_ = a.gear;
+        prevFlaps_ = a.flaps;
+
+        // Колесо триммера щёлкает, пока триммер заметно движется (в том числе от автопилота).
+        float trimRate = fabsf(c.trim - prevTrim_) / fmaxf(GetFrameTime(), 1e-3f);
+        prevTrim_ = c.trim;
+        trimTimer_ -= GetFrameTime();
+        if (!paused && !a.crashed && trimRate > 0.03f && trimTimer_ <= 0.0f) {
+            PlaySound(trimTick_);
+            trimTimer_ = 0.075f;
+        }
+    }
 
     for (int guard = 0; guard < 4 && IsAudioStreamProcessed(engine_); ++guard) {
         FillEngine(buf_.data(), STREAM_FRAMES, a, paused);
@@ -281,7 +363,7 @@ void AudioSystem::Update(const Aircraft& a, const WarningSystem& w, CalloutSyste
     }
 
     // Отказы: звонок при пожаре, одиночный сигнал при появлении нового отказа.
-    for (Alert s : {Alert::EngFail, Alert::GearUnsafe, Alert::FlapsJam, Alert::FuelLow, Alert::Overstress, Alert::Structure}) {
+    for (Alert s : {Alert::EngFail, Alert::GearUnsafe, Alert::FlapsJam, Alert::FuelLow, Alert::Overstress, Alert::Structure, Alert::Ice, Alert::BrakesHot}) {
         bool on = !paused && w.Active(s);
         if (on && !prevCaution_[(int)s]) PlaySound(chime_);
         prevCaution_[(int)s] = on;
@@ -305,11 +387,13 @@ void AudioSystem::PlayCrash()
     PlaySound(crash_);
 }
 
-void AudioSystem::PlayTouchdown(float strength)
+void AudioSystem::PlayTouchdown(float strength, float speedMs)
 {
     if (!ready_) return;
     SetSoundVolume(touchdown_, fs::Clampf(strength, 0.15f, 1.0f));
     PlaySound(touchdown_);
+    SetSoundVolume(screech_, fs::Clampf(speedMs / 70.0f, 0.1f, 1.0f));
+    PlaySound(screech_);
 }
 
 void AudioSystem::PlayApDisconnect()
@@ -324,6 +408,9 @@ void AudioSystem::StopAll()
         if (s.frameCount) StopSound(s);
     for (Sound& s : callouts_) StopSound(s);
     for (bool& b : prevCaution_) b = false;
+    StopSound(gearMotor_);
+    StopSound(flapMotor_);
+    prevGear_ = prevFlaps_ = -1;
 }
 
 void AudioSystem::PlayClick()

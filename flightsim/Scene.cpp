@@ -293,7 +293,59 @@ void Scene::MenuCamera(Vector3 target, float time)
     camera.fovy = 50.0f;
 }
 
+// Тряска: предупреждение о сваливании («бафтинг»), превышение скорости и M, выпущенные интерцепторы
+// и шасси на большой скорости, неровности полосы (на траве — сильнее), разрушение конструкции.
+float Scene::ShakeAmount(const Aircraft& a) const
+{
+    if (a.crashed) return 0.0f;
+    const AircraftType& t = a.Type();
+    float iasKt = a.ias * MS_TO_KT;
+    float airborne = a.onGround ? 0.3f : 1.0f;
+    float s = 0.0f;
+    if (a.ias > 15.0f) s += 0.55f * SmoothStep(a.stallAlpha - 4.0f * DEG2RAD, a.stallAlpha + 2.0f * DEG2RAD, a.alpha) * airborne;
+    s += 0.6f * SmoothStep(t.vmo, t.vmo + 40.0f, iasKt);
+    s += 0.5f * SmoothStep(0.80f, 0.88f, a.mach);
+    s += 0.12f * a.speedbrake * SmoothStep(120.0f, 300.0f, iasKt);
+    if (t.retractableGear) s += 0.08f * a.gear * SmoothStep(150.0f, 260.0f, iasKt) * airborne;
+    if (a.onGround) {
+        float gs = sqrtf(a.vel.x * a.vel.x + a.vel.z * a.vel.z);
+        int ap = world::NearestAirport(a.pos.x, a.pos.z);
+        bool paved = world::GetAirport(ap).rwy.Contains(a.pos.x, a.pos.z, 40.0f);
+        s += (paved ? 0.10f : 0.45f) * SmoothStep(2.0f, 50.0f, gs);
+        if (a.tireFlat[0] || a.tireFlat[1]) s += 0.35f * SmoothStep(1.0f, 20.0f, gs);
+    }
+    if (a.Broken()) s += 0.5f;
+    return Clampf(s, 0.0f, 1.2f);
+}
+
+void Scene::ApplyShake(const Aircraft& a, CamMode mode, float dt)
+{
+    shakeSmooth_ = ::Lerp(shakeSmooth_, ShakeAmount(a), fminf(dt * 6.0f, 1.0f));
+    kick_ = fmaxf(kick_ - dt * 2.5f, 0.0f);
+    shakeTime_ += dt;
+    float k = a.Type().span / 15.9f;
+    float amp = (0.035f * shakeSmooth_ + 0.12f * kick_ * kick_);
+    if (mode == CamMode::Chase) amp *= 4.0f * k;
+    else if (mode != CamMode::Cockpit) return;   // снаружи и с вышки камера не трясётся
+    float tt = shakeTime_;
+    // Сумма несоизмеримых синусов — «шум» без периодичности; толчок — затухающее колебание вниз-вверх.
+    Vector3 off{sinf(tt * 37.0f) * 0.6f + sinf(tt * 59.0f + 1.3f) * 0.4f,
+                sinf(tt * 43.0f + 0.7f) * 0.7f + sinf(tt * 71.0f + 2.1f) * 0.3f,
+                sinf(tt * 31.0f + 2.9f) * 0.5f + sinf(tt * 53.0f + 0.4f) * 0.3f};
+    off = Vector3Scale(off, amp);
+    off.y -= 0.25f * kick_ * kick_ * sinf(tt * 22.0f) * (mode == CamMode::Chase ? 4.0f * k : 1.0f);
+    Vector3 w = Rotate(off, a.rot);
+    camera.position = Vector3Add(camera.position, w);
+    camera.target = Vector3Add(camera.target, Vector3Scale(w, 0.6f));
+}
+
 void Scene::UpdateCamera(const Aircraft& a, CamMode mode, float dt)
+{
+    UpdateCameraBase(a, mode, dt);
+    ApplyShake(a, mode, dt);
+}
+
+void Scene::UpdateCameraBase(const Aircraft& a, CamMode mode, float dt)
 {
     const AircraftType& t = a.Type();
     const float k = t.span / 15.9f;
@@ -531,6 +583,13 @@ void Scene::DrawAirport(int index, float time, Vector3 wind)
 
 // ---------------------------------------------------------------- модели самолётов
 
+// Лёд на передней кромке и плоскостях: крыло белеет.
+static Color Iced(Color c, float ice)
+{
+    float k = Clampf(ice * 0.8f, 0.0f, 0.8f);
+    return Color{(unsigned char)::Lerp(c.r, 236, k), (unsigned char)::Lerp(c.g, 242, k), (unsigned char)::Lerp(c.b, 250, k), c.a};
+}
+
 // Какие части модели рисовать: целый самолёт без оторванных частей или только обломок.
 enum { PM_BODY = 1, PM_WING_L = 2, PM_WING_R = 4, PM_TAIL = 8, PM_ALL = 15 };
 static bool WingOn(int mask, float s) { return mask & (s < 0 ? PM_WING_L : PM_WING_R); }
@@ -538,7 +597,7 @@ static bool WingOn(int mask, float s) { return mask & (s < 0 ? PM_WING_L : PM_WI
 void Scene::DrawLightJet(const Aircraft& a, const Matrix& world, int mask)
 {
     const Color body{236, 238, 242, 255}, accent{196, 34, 46, 255}, glass{28, 38, 54, 255};
-    const Color wing{208, 212, 218, 255}, surface{178, 184, 194, 255}, dark{40, 42, 46, 255}, tire{25, 25, 25, 255};
+    const Color wing = Iced({208, 212, 218, 255}, a.ice), surface{178, 184, 194, 255}, dark{40, 42, 46, 255}, tire{25, 25, 25, 255};
     const bool B = mask & PM_BODY;
 
     if (B) {
@@ -608,7 +667,7 @@ void Scene::DrawProp(const Aircraft& a, const Matrix& world, float time, int mas
     for (float s : {-1.0f, 1.0f}) {
         if (WingOn(mask, s)) {
         Matrix wingFrame = Xf().RX(-s * 1.5f * DEG2RAD).T(-0.3f, 0.95f, 0.0f);
-        Part(cube_, Xf().S(1.5f, 0.15f, 5.5f).T(0, 0, s * 2.75f).Then(wingFrame), world, body, 0.4f);
+        Part(cube_, Xf().S(1.5f, 0.15f, 5.5f).T(0, 0, s * 2.75f).Then(wingFrame), world, Iced(body, a.ice), 0.4f);
         float ail = s > 0 ? -a.aileron : a.aileron;
         Part(cube_, Xf().S(0.4f, 0.08f, 1.8f).T(-0.2f, 0, 0).RZ(ail).T(-0.75f, 0, s * 4.3f).Then(wingFrame), world, surface, 0.3f);
         Part(cube_, Xf().S(0.45f, 0.08f, 2.4f).T(-0.22f, 0, 0).RZ(a.flaps * DEG2RAD).T(-0.75f, 0, s * 2.0f).Then(wingFrame), world, surface, 0.3f);
@@ -648,7 +707,7 @@ void Scene::DrawProp(const Aircraft& a, const Matrix& world, float time, int mas
 void Scene::DrawAirliner(const Aircraft& a, const Matrix& world, int mask)
 {
     const Color body{240, 242, 246, 255}, belly{40, 70, 140, 255}, glass{28, 38, 54, 255};
-    const Color wing{200, 204, 212, 255}, surface{176, 182, 192, 255}, dark{38, 40, 44, 255}, tire{25, 25, 25, 255};
+    const Color wing = Iced({200, 204, 212, 255}, a.ice), surface{176, 182, 192, 255}, dark{38, 40, 44, 255}, tire{25, 25, 25, 255};
     const bool B = mask & PM_BODY;
 
     if (B) {
@@ -843,6 +902,8 @@ void Scene::Draw(const Aircraft& a, const Terrain& t, CamMode mode, float time, 
         for (const Vector3& p : scenery_.StreetLights())
             if (Vector3Distance(p, camera.position) < fminf(drawDist, 9000.0f)) Glow(p, Color{255, 200, 120, 200}, 4.0f, 0.0012f);
     for (int i = 0; i < world::AirportCount(); ++i) DrawAirport(i, time, wind);
+    rlDrawRenderBatchActive();
+    fx.DrawSkidMarks(camera, fminf(3500.0f, env_.visibility * 0.7f) * (env_.FogDensity(camAlt) > 0.01f ? 0.1f : 1.0f));
     if (showAircraft) DrawAircraftModel(a, time, mode != CamMode::Cockpit);
     rlDrawRenderBatchActive();
     if (showAircraft) DrawShadow(a, t);

@@ -17,9 +17,10 @@ float StallAlpha(const AircraftType& t, float ff) { return (t.stallDeg - t.stall
 float Cl0(const AircraftType& t, float ff) { return t.cl0 + t.clFlaps * ff; }
 
 // Коэффициент подъёмной силы по углу атаки: линейный участок, срыв, «плоская пластина».
-float LiftCoef(const AircraftType& t, float a, float ff, float* stallFactor)
+// iceLoss — насколько лёд на крыле уменьшает критический угол атаки, рад.
+float LiftCoef(const AircraftType& t, float a, float ff, float* stallFactor, float iceLoss = 0.0f)
 {
-    const float as = StallAlpha(t, ff), cl0 = Cl0(t, ff);
+    const float as = StallAlpha(t, ff) - iceLoss, cl0 = Cl0(t, ff);
     const float plate = 1.05f * sinf(2.0f * a);
     *stallFactor = fmaxf(SmoothStep(as - 1.0f * DEG2RAD, as + 4.0f * DEG2RAD, a),
                          SmoothStep(-NEG_STALL + 1.0f * DEG2RAD, -NEG_STALL + 5.0f * DEG2RAD, -a));
@@ -77,6 +78,10 @@ void Aircraft::Reset(Vector3 position, float headingDeg, float speedMs, bool gro
     wheelsOnGround = ground ? 3 : 0;
     for (bool& w : wheelContact_) w = ground;
     for (bool& f : failures_) f = false;
+    ice = 0;
+    for (float& b : brakeTemp) b = oat;
+    for (bool& f : tireFlat) f = false;
+    plugHeat_[0] = plugHeat_[1] = 0;
     crashed = false;
     crashFire = true;
     crashReason.clear();
@@ -131,7 +136,7 @@ float Aircraft::StallSpeedKt() const
 {
     const AircraftType& t = *type_;
     float ff = FlapFrac(t, flaps);
-    float clmax = Cl0(t, ff) + CL_ALPHA * StallAlpha(t, ff);
+    float clmax = (Cl0(t, ff) + CL_ALPHA * (StallAlpha(t, ff) - IceStallLossDeg() * DEG2RAD)) * (1.0f - 0.1f * ice);
     return sqrtf(2.0f * Mass() * G / (1.225f * t.wingArea * clmax)) * MS_TO_KT;
 }
 
@@ -311,6 +316,8 @@ float Aircraft::EngineThrust(int i, float V, float rho, float dt, const Controls
 
     float frac = Clampf((e.n1 - t.idleN1) / (100.0f - t.idleN1), 0, 1);
     float raw = running ? RawThrust(t, frac, V, rho, mach) : 0.0f;
+    if (t.jet && c.antiIce) raw *= 0.96f;              // отбор воздуха на обогрев
+    if (!t.jet) raw *= 1.0f - 0.18f * ice;             // лёд на винте и в воздухозаборнике
     if (running && e.n1 < t.idleN1 - 1.0f) raw *= Clampf(e.n1 / t.idleN1, 0, 1);
     // Реверс: створки разворачивают часть струи вперёд.
     e.thrust = raw * (1.0f - reverser) - raw * reverser * 0.45f;
@@ -318,7 +325,7 @@ float Aircraft::EngineThrust(int i, float V, float rho, float dt, const Controls
     if (running) {
         float burn = t.jet ? t.fuelFlowCoef * fmaxf(raw, t.maxThrust / t.engineCount * 0.04f)
                            : t.fuelFlowCoef * t.propPower * (0.05f + 0.95f * frac);
-        fuelFlow += burn;
+        fuelFlow += burn * (t.jet && c.antiIce ? 1.05f : 1.0f);
     }
     return e.thrust;
 }
@@ -403,12 +410,29 @@ void Aircraft::Step(float dt, const Controls& c, const Terrain& terrain, Vector3
     if (failures_[(int)Failure::FuelLeak]) fuelFlow += t.maxFuel * 0.004f;
     fuel = fmaxf(fuel - fuelFlow * dt, 0.0f);
 
+    // ------------------------------------------------ обледенение
+    // В облаке при температуре от +2 до −25 °C на передней кромке нарастает лёд (сильнее всего около −6 °C,
+    // в переохлаждённом дожде — вдвое быстрее). Обогрев крыла его срывает; у «Сессны» обогрева крыла нет.
+    {
+        lastAntiIce = c.antiIce;
+        const bool deice = c.antiIce && t.kind != AircraftKind::Prop;
+        if (Icing() && !deice) {
+            float k = Clampf(1.0f - fabsf(oat + 6.0f) / 20.0f, 0.25f, 1.0f) * (inRain ? 2.0f : 1.0f);
+            ice += k * Clampf(V / 80.0f, 0.3f, 1.5f) * dt / 300.0f;
+        }
+        if (deice) ice -= dt / 20.0f;
+        if (oat > 1.0f) ice -= (oat - 1.0f) * dt / 150.0f;   // тает в тёплом воздухе
+        else if (!inCloud) ice -= dt / 900.0f;               // медленно испаряется вне облаков
+        ice = Clampf(ice, 0.0f, 1.0f);
+    }
+
     // ------------------------------------------------ аэродинамика
     alpha = V > 1.0f ? atan2f(-vb.y, vb.x) : 0.0f;
     beta = V > 1.0f ? asinf(Clampf(vb.z / V, -1, 1)) : 0.0f;
 
     const float ff = FlapFrac(t, flaps);
-    stallAlpha = StallAlpha(t, ff);
+    const float iceLoss = IceStallLossDeg() * DEG2RAD;
+    stallAlpha = StallAlpha(t, ff) - iceLoss;
     const float Vd = fmaxf(V, 10.0f);
     const float p = omega.x, q = omega.z, r = -omega.y;
     const float ph = p * t.span / (2 * Vd), qh = q * t.chord / (2 * Vd), rh = r * t.span / (2 * Vd);
@@ -420,7 +444,8 @@ void Aircraft::Step(float dt, const Controls& c, const Terrain& terrain, Vector3
     float groundEffect = (ge * ge) / (1.0f + ge * ge);
 
     float stall = 0;
-    float cl = LiftCoef(t, alpha, ff, &stall);
+    float cl = LiftCoef(t, alpha, ff, &stall, iceLoss);
+    cl *= 1.0f - 0.1f * ice;
     cl += 4.0f * qh + 0.35f * elevEff;
     cl *= 1.0f - 0.15f * speedbrake * (onGround ? 3.0f : 1.0f);   // на земле интерцепторы «гасят» подъёмную силу
     cl *= 1.0f + 0.08f * (1.0f - groundEffect);
@@ -429,7 +454,7 @@ void Aircraft::Step(float dt, const Controls& c, const Terrain& terrain, Vector3
     const float kInduced = 1.0f / (PI * 0.8f * aspect);
     float sa = sinf(alpha);
     float cd = t.cd0 + kInduced * cl * cl * (0.3f + 0.7f * groundEffect)
-             + t.cdFlapsLin * ff + t.cdFlapsSq * ff * ff + t.cdGear * gear + 0.035f * speedbrake
+             + t.cdFlapsLin * ff + t.cdFlapsSq * ff * ff + t.cdGear * gear + 0.035f * speedbrake + 0.025f * ice
              + 0.6f * beta * beta
              + 1.2f * sa * sa * SmoothStep(stallAlpha - 3.0f * DEG2RAD, stallAlpha + 8.0f * DEG2RAD, fabsf(alpha));
     if (mach > 0.72f) cd += 25.0f * Sq(mach - 0.72f);   // волновой кризис
@@ -495,7 +520,10 @@ void Aircraft::Step(float dt, const Controls& c, const Terrain& terrain, Vector3
             wheelContact_[k] = false;
             continue;
         }
-        Vector3 rw = Rotate(t.contacts[k], rot);
+        Vector3 local = t.contacts[k];
+        // Спущенная шина: колесо стоит на ободе — ниже и с сильным трением.
+        if ((k == LEFT_MAIN || k == RIGHT_MAIN) && tireFlat[k - LEFT_MAIN]) local.y += t.restHeight * 0.07f;
+        Vector3 rw = Rotate(local, rot);
         Vector3 pw = Vector3Add(pos, rw);
         float ground = terrain.SurfaceHeight(pw.x, pw.z);
         float depth = ground - pw.y;
@@ -603,7 +631,17 @@ void Aircraft::Step(float dt, const Controls& c, const Terrain& terrain, Vector3
         float vs = Vector3DotProduct(vp, sideDir);
 
         float muRoll = 0.015f;
-        if (k == LEFT_MAIN || k == RIGHT_MAIN) muRoll += 0.55f * (c.parkingBrake ? 1.0f : Clampf(c.brakes, 0, 1));
+        if (k == LEFT_MAIN || k == RIGHT_MAIN) {
+            const int side = k - LEFT_MAIN;
+            // Перегретые тормоза слабеют (fade).
+            float fade = 1.0f - 0.5f * SmoothStep(450.0f, 900.0f, brakeTemp[side]);
+            float brake = 0.55f * fade * (c.parkingBrake ? 1.0f : Clampf(c.brakes, 0, 1));
+            muRoll += brake;
+            if (tireFlat[side]) muRoll += 0.25f;
+            // Вся работа торможения уходит в тепло тормозных дисков.
+            float heatCap = 2.8f * (t.emptyMass + t.payload + t.defaultFuel);   // Дж/К на одну сторону
+            brakeTemp[side] += brake * fn * fabsf(tanhf(vl / 0.3f) * vl) * dt / heatCap;
+        }
         float muSide = hard ? 0.5f : 0.8f;
         if (hard) muRoll = 0.5f;
         float fl = -muRoll * fn * tanhf(vl / 0.3f);
@@ -615,6 +653,15 @@ void Aircraft::Step(float dt, const Controls& c, const Terrain& terrain, Vector3
     }
     wheelsOnGround = wheels;
     onGround = wheels > 0;
+    // Остывание тормозов (быстрее на ходу, медленно в убранной нише шасси) и плавкие пробки:
+    // при перегреве они выпускают воздух из шины, чтобы она не взорвалась.
+    for (int side = 0; side < 2; ++side) {
+        float cool = (gear > 0.5f ? 1.0f / 600.0f : 1.0f / 1500.0f) + groundSpeed * 0.00006f;
+        brakeTemp[side] -= (brakeTemp[side] - oat) * cool * dt;
+        // Пробки плавятся не сразу: тепло от дисков доходит до колеса за полминуты.
+        plugHeat_[side] = brakeTemp[side] > FUSE_PLUG ? plugHeat_[side] + dt : fmaxf(plugHeat_[side] - dt, 0.0f);
+        if (plugHeat_[side] > 25.0f && t.retractableGear) tireFlat[side] = true;
+    }
     // Повреждённый самолёт остановился на земле — полёт окончен, но без взрыва.
     if ((belly_ || Broken() || damage.size()) && Vector3Length(vel) < 0.8f && (onGround || belly_)
         && pos.y - terrain.SurfaceHeight(pos.x, pos.z) < t.restHeight + 1.0f) {

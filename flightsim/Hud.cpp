@@ -449,6 +449,7 @@ void DrawSystems(const Aircraft& a, const Controls& c, float x, float y)
     Annunciator("PARK BRK", ax, ay + 22 * S, 84 * S, c.parkingBrake, kAmber);
     Annunciator(a.reverser > 0.05f ? "REVERSE" : "BRAKES", ax, ay + 44 * S, 84 * S,
                 a.reverser > 0.05f || (c.brakes > 0.05f && !c.parkingBrake), kGreen);
+    Annunciator("ANTI ICE", ax, ay + 66 * S, 84 * S, c.antiIce, kGreen);
 
     // Положение штурвала и педалей
     float sx = x + 20 * S, sy = y + 150 * S, ss = 80 * S;
@@ -480,9 +481,15 @@ void DrawData(const Aircraft& a, const WarningSystem& w, float x, float y)
     Text(buf, x, y + 54 * S, 13, WHITE);
     snprintf(buf, sizeof buf, "VS   %5.0f", a.vel.y * MS_TO_FPM);
     Text(buf, x, y + 72 * S, 13, WHITE);
+    snprintf(buf, sizeof buf, "OAT  %+4.0f°C", a.oat);
+    Text(buf, x, y + 90 * S, 13, a.Icing() ? kCyan : WHITE);
+    // Температура тормозов: белая — норма, жёлтая — горячие, красная — сейчас спустят шины.
+    float bt = fmaxf(a.brakeTemp[0], a.brakeTemp[1]);
+    snprintf(buf, sizeof buf, "BRK %3.0f/%3.0f", a.brakeTemp[0], a.brakeTemp[1]);
+    Text(buf, x, y + 108 * S, 13, bt > 500.0f ? kRed : (bt > Aircraft::BRAKES_HOT ? kAmber : WHITE));
     if (w.timeToImpact > 0) {
         snprintf(buf, sizeof buf, "TERR %4.0fs", w.timeToImpact);
-        Text(buf, x, y + 90 * S, 13, kAmber);
+        Text(buf, x + 100 * S, y + 90 * S, 13, kAmber);
     }
 }
 
@@ -524,6 +531,25 @@ void DrawEcam(const Aircraft& a, float x, float y, float w)
         msgs.push_back({"GEAR UNSAFE", L("H - alternate gear extension (gravity)", "H — аварийный выпуск шасси (под весом)"), kAmber});
     if (a.Failed(Failure::FlapsJam))
         msgs.push_back({"FLAPS JAMMED", L("Fly the approach ~20 kt faster", "Заход на скорости на ~20 kt выше"), kAmber});
+    if (a.ice > 0.05f) {
+        char ib[32];
+        snprintf(ib, sizeof ib, "ICE %d%%", (int)(a.ice * 100.0f + 0.5f));
+        if (t.kind == AircraftKind::Prop)
+            msgs.push_back({ib, L("No wing de-ice: leave the cloud, descend to warmer air, +10 kt",
+                                  "Обогрева крыла нет: выйдите из облака, снизьтесь в тепло, +10 kt"), kAmber});
+        else if (!a.lastAntiIce)
+            msgs.push_back({ib, L("I - anti-ice ON; stall speed is higher", "I — включить обогрев; скорость сваливания выше"), kAmber});
+        else
+            msgs.push_back({ib, L("Anti-ice ON - ice is shedding", "Обогрев включён — лёд сходит"), kGreen});
+    } else if (a.Icing() && !a.lastAntiIce && t.kind != AircraftKind::Prop) {
+        msgs.push_back({"ICING CONDITIONS", L("Cloud below +2 C: I - anti-ice ON", "Облако и ниже +2 °C: I — включить обогрев"), kAmber});
+    }
+    for (int i = 0; i < 2; ++i)
+        if (a.tireFlat[i])
+            msgs.push_back({i == 0 ? "L MAIN TIRE FLAT" : "R MAIN TIRE FLAT",
+                            L("Fuse plug released: hold straight with rudder", "Сработала плавкая пробка: держите педалями"), kAmber});
+    if (fmaxf(a.brakeTemp[0], a.brakeTemp[1]) > Aircraft::BRAKES_HOT)
+        msgs.push_back({"BRAKES HOT", L("Let them cool; over 550 C the tires deflate", "Дайте остыть; выше 550 °C спускают шины"), kAmber});
     if (a.tailStrike) msgs.push_back({"TAIL STRIKE", L("Lower pitch on rotation/flare", "Меньше тангаж при отрыве и выравнивании"), kAmber});
     for (const Msg& m : msgs) {
         Text(m.title.c_str(), x, y, 15, m.c);
@@ -620,7 +646,7 @@ void DrawAlerts(const WarningSystem& w, float time)
     // Активные сигналы по приоритету
     const Alert order[] = {Alert::Structure, Alert::PullUp, Alert::EngFire, Alert::Overspeed, Alert::Stall, Alert::Terrain, Alert::SinkRate,
                            Alert::TooLowGear, Alert::BankAngle, Alert::EngFail, Alert::GearUnsafe, Alert::FuelLow, Alert::FlapsJam,
-                           Alert::Overstress};
+                           Alert::Overstress, Alert::Ice, Alert::BrakesHot};
     float y = 92 * S;
     bool first = true;
     for (Alert a : order) {
@@ -717,6 +743,7 @@ std::vector<std::string> HelpLines(const Aircraft& a)
         L("Trim: [ / ] or Home / End      Flaps: F extend, V retract", "Триммер: [ / ] или Home / End      Закрылки: F выпустить, V убрать"),
         L("Gear: G   Alternate gear: H   Brakes: Space/B   Parking brake: P", "Шасси: G   Аварийный выпуск: H   Тормоза: Space/B   Стояночный: P"),
         L("Speed brake: / or K   Fire handle: J   Camera: C (mouse to look)", "Интерцепторы: / или K   Пожарный кран: J   Камера: C (мышь — обзор)"),
+        L("Anti-ice: I (in cloud below +2 C)   Watch brake temperature: BRK", "Обогрев от обледенения: I (в облаке ниже +2 °C)   Температура тормозов: BRK"),
         L("Autopilot: T - AP, Y - auto throttle, L - ILS, U - V/S, O - FD", "Автопилот: T — AP, Y — автомат тяги, L — ILS, U — V/S, O — директор"),
         L("Targets: 9/0 heading, -/= altitude, ,/. speed, ;/' vertical speed", "Задатчики: 9/0 курс, -/= высота, ,/. скорость, ;/' вертикальная"),
         L("Wind: F8   Pause/menu: Esc   Restart: R", "Ветер: F8   Пауза/меню: Esc   Заново: R"),
@@ -729,6 +756,52 @@ std::vector<std::string> HelpLines(const Aircraft& a)
 }
 
 } // namespace
+
+void DrawVisionEffects(float grey, float red, float frost)
+{
+    static Texture2D vignette{};
+    if (vignette.id == 0) {
+        // Прозрачный центр, к краям — непрозрачно (белым, чтобы красить любым цветом).
+        const int n = 256;
+        Image img = GenImageColor(n, n, BLANK);
+        for (int y = 0; y < n; ++y)
+            for (int x = 0; x < n; ++x) {
+                float dx = (x + 0.5f) / n * 2.0f - 1.0f, dy = (y + 0.5f) / n * 2.0f - 1.0f;
+                float r = sqrtf(dx * dx + dy * dy);
+                float a = SmoothStep(0.35f, 1.0f, r);
+                ImageDrawPixel(&img, x, y, Color{255, 255, 255, (unsigned char)(a * 255.0f)});
+            }
+        vignette = LoadTextureFromImage(img);
+        SetTextureFilter(vignette, TEXTURE_FILTER_BILINEAR);
+        UnloadImage(img);
+    }
+    const float sw = (float)GetScreenWidth(), sh = (float)GetScreenHeight();
+    // Пятно-«туннель» заданного размера; за его пределами — сплошной цвет.
+    auto tunnel = [&](float sizeK, Color c) {
+        float d = fmaxf(sw, sh) * sizeK;
+        float x0 = sw * 0.5f - d * 0.5f, y0 = sh * 0.5f - d * 0.5f;
+        DrawTexturePro(vignette, {0, 0, (float)vignette.width, (float)vignette.height}, {x0, y0, d, d}, {0, 0}, 0.0f, c);
+        if (x0 > 0) {
+            DrawRectangle(0, 0, (int)ceilf(x0), (int)sh, c);
+            DrawRectangle((int)(x0 + d), 0, (int)ceilf(x0) + 1, (int)sh, c);
+        }
+        if (y0 > 0) {
+            DrawRectangle(0, 0, (int)sw, (int)ceilf(y0), c);
+            DrawRectangle(0, (int)(y0 + d), (int)sw, (int)ceilf(y0) + 1, c);
+        }
+    };
+    if (frost > 0.01f) tunnel(1.6f, Color{232, 240, 250, (unsigned char)(Clampf(frost, 0, 1) * 190.0f)});
+    if (grey > 0.01f) {
+        DrawRectangle(0, 0, (int)sw, (int)sh, Color{100, 100, 100, (unsigned char)(Clampf(grey, 0, 1) * 150.0f)});   // краски тускнеют
+        tunnel(::Lerp(1.9f, 0.3f, Clampf(grey, 0, 1)), Color{0, 0, 0, 255});
+        float black = SmoothStep(0.75f, 1.0f, grey);
+        if (black > 0) DrawRectangle(0, 0, (int)sw, (int)sh, Color{0, 0, 0, (unsigned char)(black * 255.0f)});
+    }
+    if (red > 0.01f) {
+        DrawRectangle(0, 0, (int)sw, (int)sh, Color{170, 0, 0, (unsigned char)(Clampf(red, 0, 1) * 150.0f)});
+        tunnel(::Lerp(1.9f, 0.6f, Clampf(red, 0, 1)), Color{110, 0, 0, 255});
+    }
+}
 
 void DrawHud(const Aircraft& a, const Controls& c, const WarningSystem& w, const Terrain& t,
              const Camera3D& cam, const HudInfo& info)

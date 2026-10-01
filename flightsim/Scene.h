@@ -22,6 +22,8 @@ public:
     void UpdateCamera(const Aircraft& a, CamMode mode, float dt);
     // Медленный облёт для фона меню.
     void MenuCamera(Vector3 target, float time);
+    // Толчок камеры (касание полосы): strength 0..1.
+    void Kick(float strength) { kick_ = fmaxf(kick_, strength); }
     void Draw(const Aircraft& a, const Terrain& t, CamMode mode, float time, Vector3 wind, const Effects& fx,
               bool showAircraft = true);
 
@@ -62,4 +64,8 @@ private:
     Vector3 chaseOffset_{};   // сглаженное положение камеры преследования относительно самолёта
     float orbitYaw_ = 200.0f, orbitPitch_ = 12.0f, orbitDist_ = 35.0f;
     float lookYaw_ = 0, lookPitch_ = 0;   // обзор из кабины (ПКМ)
+    float kick_ = 0, shakeTime_ = 0, shakeSmooth_ = 0;
+    float ShakeAmount(const Aircraft& a) const;   // 0..1: тряска от сваливания, скорости, полосы, повреждений
+    void ApplyShake(const Aircraft& a, CamMode mode, float dt);
+    void UpdateCameraBase(const Aircraft& a, CamMode mode, float dt);
 };

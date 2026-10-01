@@ -29,5 +29,9 @@ struct HudInfo {
     std::vector<std::string> missionLines;
 };
 
+// Перегрузка глазами пилота: grey 0..1 — сужение поля зрения и потемнение (1 — потеря зрения),
+// red 0..1 — «красная пелена» при отрицательной перегрузке, frost 0..1 — иней на стекле.
+void DrawVisionEffects(float grey, float red, float frost);
+
 void DrawHud(const Aircraft& a, const Controls& c, const WarningSystem& w, const Terrain& t,
              const Camera3D& cam, const HudInfo& info);

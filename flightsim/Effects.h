@@ -21,6 +21,7 @@ public:
     void DrawClouds(const Camera3D& cam, const Environment& env) const;           // облака
     void DrawParticles(const Camera3D& cam) const;
     void DrawRain3D(const Camera3D& cam, const Environment& env) const;
+    void DrawSkidMarks(const Camera3D& cam, float maxDist) const;   // следы шин на полосах
     // 2D: капли на лобовом стекле (вид из кабины).
     void DrawWindshield(const Environment& env, float airspeed, bool belowClouds) const;
 
@@ -34,8 +35,12 @@ private:
     };
     struct Puff { Vector3 pos; float size; float shade; };
     struct Drop { float x, y, r, speed; };
+    struct Skid { Vector3 a, b; float w; unsigned char alpha; };
 
     void Spawn(Vector3 p, Vector3 v, float life, float size, float grow, Color c);
+    void AddRunwayRubber();                                   // старые следы в зонах приземления
+    void AddSkid(Vector3 a, Vector3 b, float w, unsigned char alpha);
+    static Vector3 MarkPoint(Vector3 wheel);                  // точка следа на поверхности
 
     Texture2D soft_{}, cloudTex_{};
     Mesh layer_{};
@@ -45,6 +50,9 @@ private:
     std::vector<Vector3> stars_;
     std::vector<Vector3> rain_;
     std::vector<Drop> drops_;
+    std::vector<Skid> skids_;
+    Vector3 flatLast_[2]{};
+    bool flatTrail_[2] = {false, false};
     float exhaustTimer_ = 0, fireTimer_ = 0, rainCamY_ = 0;
     Vector3 lastCam_{};
 };

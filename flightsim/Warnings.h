@@ -2,10 +2,11 @@
 
 class Aircraft;
 class Terrain;
+struct Controls;
 
 // Сигнализация: GPWS/TAWS (земля), превышение скорости, крен, сваливание, отказы систем.
 enum class Alert { PullUp, Terrain, SinkRate, TooLowGear, BankAngle, Overspeed, Stall,
-                   EngFire, Structure, EngFail, GearUnsafe, FlapsJam, FuelLow, Overstress, Count };
+                   EngFire, Structure, EngFail, GearUnsafe, FlapsJam, FuelLow, Overstress, Ice, BrakesHot, Count };
 
 class WarningSystem {
 public:
@@ -29,13 +30,15 @@ private:
     float hold_[N] = {};
 };
 
-// Голосовой отсчёт радиовысоты на посадке: 1000, 500, «Minimums» (200), 100, 50, 40, 30, 20, 10, «Retard».
-enum class Callout { C1000, C500, Minimums, C100, C50, C40, C30, C20, C10, Retard, Count };
+// Голосовой отсчёт радиовысоты на посадке: 1000, 500, «Minimums» (200), 100, 50, 40, 30, 20, 10, «Retard»;
+// на взлёте — «V1», «Rotate», «Positive climb», «Gear up»; на снижении — «2500» и «Hundred above» (300 ft).
+enum class Callout { C1000, C500, Minimums, C100, C50, C40, C30, C20, C10, Retard,
+                     V1, Rotate, PositiveClimb, GearUp, C2500, HundredAbove, Count };
 
 class CalloutSystem {
 public:
     void Reset();
-    void Update(const Aircraft& a, float raFt, float throttle, float dt);
+    void Update(const Aircraft& a, float raFt, const Controls& c, float dt);
     // Следующее сообщение для проигрывания (Callout::Count — нет).
     Callout Pop();
     static const char* Text(Callout c);
@@ -50,5 +53,8 @@ private:
     Callout queue_[4] = {};
     int queueLen_ = 0;
     float retardTimer_ = 0;
+    bool takeoff_ = false, v1_ = false, rotate_ = false, posClimb_ = false, gearUp_ = false;
+    float posClimbTime_ = 0;
+    bool armed2500_ = false, armedHundred_ = false;
     void Push(Callout c);
 };

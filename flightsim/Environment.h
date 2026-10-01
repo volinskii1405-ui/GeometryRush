@@ -20,6 +20,10 @@ struct Environment {
     float cloudBase = 0, cloudTop = 0;   // м над уровнем моря
     bool night = false, dusk = false;    // ночные огни; огни в сумерках
     bool showSun = true;
+    float seaTempC = 15;       // температура у моря; с высотой падает на 6.5 °C/км
+
+    float OatAt(float altM) const { return seaTempC - 0.0065f * altM; }
+    bool InCloud(float altM) const { return overcast && altM > cloudBase && altM < cloudTop; }
 
     static const char* TimeName(TimeOfDay t)
     {
@@ -115,6 +119,10 @@ struct Environment {
             break;
         default: break;
         }
+        e.seaTempC = t == TimeOfDay::Day ? 15.0f : (t == TimeOfDay::Sunset ? 10.0f : 3.0f);
+        if (w == WeatherKind::Overcast) e.seaTempC -= 2.0f;
+        if (w == WeatherKind::Rain) e.seaTempC = fmaxf(e.seaTempC - 5.0f, 2.0f);
+        if (w == WeatherKind::Fog) e.seaTempC -= 1.0f;
         e.fogColor = e.horizon;
         if (e.overcast && !e.night) e.dusk = e.dusk || w == WeatherKind::Fog || w == WeatherKind::Rain;
         return e;

@@ -32,6 +32,8 @@ const char* WarningSystem::Text(Alert a)
     case Alert::FuelLow: return "FUEL LOW";
     case Alert::Structure: return "STRUCTURAL FAILURE";
     case Alert::Overstress: return "OVERSTRESS";
+    case Alert::Ice: return "ICE DETECTED";
+    case Alert::BrakesHot: return "BRAKES HOT";
     default: return "";
     }
 }
@@ -123,6 +125,8 @@ void WarningSystem::Update(const Aircraft& a, const Terrain& t, float dt)
         cond[(int)Alert::FuelLow] = a.fuel < a.Type().maxFuel * 0.08f;
         cond[(int)Alert::Structure] = a.Broken();
         cond[(int)Alert::Overstress] = a.overstressed && !a.Broken();
+        cond[(int)Alert::Ice] = a.ice > 0.05f && (!a.lastAntiIce || a.Type().kind == AircraftKind::Prop);
+        cond[(int)Alert::BrakesHot] = fmaxf(a.brakeTemp[0], a.brakeTemp[1]) > Aircraft::BRAKES_HOT;
     }
 
     for (int i = 0; i < N; ++i) {
@@ -148,6 +152,9 @@ void CalloutSystem::Reset()
     shown = Callout::Count;
     showTimer = 0;
     retardTimer_ = 0;
+    takeoff_ = v1_ = rotate_ = posClimb_ = gearUp_ = false;
+    posClimbTime_ = 0;
+    armed2500_ = armedHundred_ = false;
 }
 
 const char* CalloutSystem::Text(Callout c)
@@ -163,6 +170,12 @@ const char* CalloutSystem::Text(Callout c)
     case Callout::C20: return "20";
     case Callout::C10: return "10";
     case Callout::Retard: return "RETARD";
+    case Callout::V1: return "V1";
+    case Callout::Rotate: return "ROTATE";
+    case Callout::PositiveClimb: return "POSITIVE CLIMB";
+    case Callout::GearUp: return "GEAR UP";
+    case Callout::C2500: return "2500";
+    case Callout::HundredAbove: return "HUNDRED ABOVE";
     default: return "";
     }
 }
@@ -180,6 +193,12 @@ const char* CalloutSystem::FileName(Callout c)
     case Callout::C20: return "callout_20.ogg";
     case Callout::C10: return "callout_10.ogg";
     case Callout::Retard: return "retard.ogg";
+    case Callout::V1: return "v1.ogg";
+    case Callout::Rotate: return "rotate.ogg";
+    case Callout::PositiveClimb: return "positive_climb.ogg";
+    case Callout::GearUp: return "gear_up.ogg";
+    case Callout::C2500: return "callout_2500.ogg";
+    case Callout::HundredAbove: return "hundred_above.ogg";
     default: return "";
     }
 }
@@ -200,8 +219,9 @@ Callout CalloutSystem::Pop()
     return c;
 }
 
-void CalloutSystem::Update(const Aircraft& a, float raFt, float throttle, float dt)
+void CalloutSystem::Update(const Aircraft& a, float raFt, const Controls& c, float dt)
 {
+    const float throttle = c.throttle;
     showTimer = fmaxf(showTimer - dt, 0.0f);
     retardTimer_ = fmaxf(retardTimer_ - dt, 0.0f);
     if (a.crashed) {
@@ -222,6 +242,45 @@ void CalloutSystem::Update(const Aircraft& a, float raFt, float throttle, float 
             }
         }
     }
+    // Взлёт (реактивные): «V1» чуть раньше V1 — с учётом времени на реакцию, «Rotate» на VR.
+    const float iasKt = a.ias * MS_TO_KT;
+    const AircraftType& t = a.Type();
+    if (a.onGround && iasKt < 30.0f) {
+        takeoff_ = true;
+        v1_ = rotate_ = posClimb_ = gearUp_ = false;
+    }
+    if (takeoff_ && a.onGround && throttle > 0.6f && t.jet) {
+        float vr = t.rotateKt;
+        if (!v1_ && iasKt > vr - 9.0f) { v1_ = true; Push(Callout::V1); }
+        if (!rotate_ && iasKt > vr) { rotate_ = true; Push(Callout::Rotate); }
+    }
+    // «Positive climb» — когда высотомер уверенно растёт; пилот отвечает «Gear up» и убирает шасси.
+    if (takeoff_ && !a.onGround && t.retractableGear) {
+        if (!posClimb_ && raFt > 15.0f && a.vel.y * MS_TO_FPM > 250.0f) {
+            posClimb_ = true;
+            posClimbTime_ = 0;
+            Push(Callout::PositiveClimb);
+        }
+        if (posClimb_) posClimbTime_ += dt;
+        if (posClimb_ && !gearUp_ && !c.gearDown && posClimbTime_ > 0.8f) {
+            gearUp_ = true;
+            Push(Callout::GearUp);
+        }
+        if (raFt > 1500.0f || posClimbTime_ > 60.0f) takeoff_ = false;
+    }
+    // «Two thousand five hundred» — радиовысотомер начал показывать высоту на снижении.
+    if (raFt > 2800.0f) armed2500_ = true;
+    if (armed2500_ && raFt <= 2500.0f && a.vel.y < -1.0f && !a.onGround) {
+        armed2500_ = false;
+        Push(Callout::C2500);
+    }
+    // «Hundred above» — 100 ft до минимума (200 ft).
+    if (raFt > 400.0f) armedHundred_ = true;
+    if (armedHundred_ && raFt <= 300.0f && active) {
+        armedHundred_ = false;
+        Push(Callout::HundredAbove);
+    }
+
     // «Retard» — пора убрать газ: ниже 20 ft, а РУД не на малом газе.
     if (active && raFt < 20.0f && throttle > 0.05f && retardTimer_ <= 0.0f) {
         Push(Callout::Retard);

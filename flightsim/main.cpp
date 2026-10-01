@@ -58,6 +58,7 @@ struct Sim {
     bool paused = false;
     bool help = false;
     bool mouseYoke = false;
+    float gGrey = 0, gRed = 0;   // перегрузка глазами пилота
     bool gamepad = false;
     CamMode cam = CamMode::Chase;
     int wind = 0;
@@ -117,6 +118,15 @@ FlightSetup FreeSetup(const Config& cfg)
         s.airSpeedKt = GetAircraftType(s.aircraft).cruiseKt;
     }
     return s;
+}
+
+// Температура за бортом и облачность — для обледенения и остывания тормозов.
+void SyncEnvironment(Sim& s)
+{
+    Aircraft& a = s.aircraft;
+    a.oat = s.env.OatAt(a.pos.y);
+    a.inCloud = s.env.InCloud(a.pos.y);
+    a.inRain = s.env.rain && a.pos.y < s.env.cloudTop;
 }
 
 void StartFlight(Sim& s, const FlightSetup& setup)
@@ -188,6 +198,8 @@ void StartFlight(Sim& s, const FlightSetup& setup)
     }
     }
     s.ctl = c;
+    SyncEnvironment(s);
+    for (float& b : s.aircraft.brakeTemp) b = s.aircraft.oat;
     s.warnings.Reset();
     s.callouts.Reset();
     s.scene.ResetCamera(s.aircraft);
@@ -195,6 +207,7 @@ void StartFlight(Sim& s, const FlightSetup& setup)
     s.time = 0;
     s.crashAge = s.finishAge = -1;
     s.touchdownTimer = 0;
+    s.gGrey = s.gRed = 0;
     s.paused = false;
     s.help = false;
     s.flying = true;
@@ -359,6 +372,7 @@ void HandleFlightInput(Sim& s, float dt)
         s.audio.PlayClick();
     }
     if (IsKeyPressed(KEY_P)) { c.parkingBrake = !c.parkingBrake; s.audio.PlayClick(); }
+    if (IsKeyPressed(KEY_I)) { c.antiIce = !c.antiIce; s.audio.PlayClick(); }   // противообледенительная система
     if (IsKeyPressed(KEY_SLASH) || IsKeyPressed(KEY_K) || IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT)) {
         c.speedbrake = !c.speedbrake;
         s.audio.PlayClick();
@@ -373,6 +387,7 @@ void UpdateFlight(Sim& s, float dt)
     s.accumulator += dt;
     bool wasCrashed = s.aircraft.crashed;
     bool touchdown = false;
+    SyncEnvironment(s);
     while (s.accumulator >= PHYSICS_DT) {
         s.ap.Update(s.aircraft, s.warnings.radioAltFt, s.ctl, PHYSICS_DT);
         s.aircraft.Step(PHYSICS_DT, s.ctl, s.terrain, WindAt(s, s.aircraft.pos));
@@ -388,16 +403,24 @@ void UpdateFlight(Sim& s, float dt)
         int ap = world::NearestAirport(s.aircraft.pos.x, s.aircraft.pos.z);
         s.touchdownCl = fabsf(world::GetAirport(ap).rwy.Local(s.aircraft.pos.x, s.aircraft.pos.z).y);
         s.touchdownTimer = 6.0f;
-        s.audio.PlayTouchdown(fabsf(s.touchdownFpm) / 600.0f);
+        s.scene.Kick(Clampf(fabsf(s.touchdownFpm) / 700.0f, 0.15f, 1.0f));
+        s.audio.PlayTouchdown(fabsf(s.touchdownFpm) / 600.0f, sqrtf(s.aircraft.vel.x * s.aircraft.vel.x + s.aircraft.vel.z * s.aircraft.vel.z));
     }
     if (s.aircraft.crashed && !wasCrashed) {
         s.crashAge = 0;
         s.audio.PlayCrash();
     }
     if (s.crashAge >= 0) s.crashAge += dt;
+    {   // Перегрузка: при +4…6.5 G кровь отливает от глаз — сужается поле зрения, потом темнеет;
+        // при −1.5…−3 G — «красная пелена». Нужно несколько секунд, чтобы наступило, и чуть быстрее проходит.
+        float g = s.aircraft.crashed ? 1.0f : s.aircraft.gLoad;
+        float tg = SmoothStep(4.0f, 6.5f, g), tr = SmoothStep(1.5f, 3.0f, -g);
+        s.gGrey = MoveTowards(s.gGrey, tg, (tg > s.gGrey ? 0.45f : 0.7f) * dt);
+        s.gRed = MoveTowards(s.gRed, tr, (tr > s.gRed ? 0.6f : 0.8f) * dt);
+    }
     s.touchdownTimer = fmaxf(s.touchdownTimer - dt, 0.0f);
     s.warnings.Update(s.aircraft, s.terrain, dt);
-    s.callouts.Update(s.aircraft, s.warnings.radioAltFt, s.ctl.throttle, dt);
+    s.callouts.Update(s.aircraft, s.warnings.radioAltFt, s.ctl, dt);
     s.fx.Update(s.aircraft, s.env, WindAt(s, s.aircraft.pos), dt, touchdown);
     s.run.Update(s.aircraft, s.warnings, s.terrain, dt);
 
@@ -472,7 +495,7 @@ int main()
             s.ap.apOffSound = false;
             if (sounding) s.audio.PlayApDisconnect();
         }
-        s.audio.Update(s.aircraft, s.warnings, s.callouts, !sounding);
+        s.audio.Update(s.aircraft, s.ctl, s.warnings, s.callouts, !sounding);
         s.scene.crashAge = s.crashAge;
         if (s.flying) s.scene.UpdateCamera(s.aircraft, s.cam, dt);
         else s.scene.MenuCamera(s.aircraft.pos, s.menuTime);
@@ -509,6 +532,10 @@ int main()
                 info.missionLines = s.run.HudLines(s.aircraft);
             }
             DrawHud(s.aircraft, s.ctl, s.warnings, s.terrain, s.scene.camera, info);
+            // Снаружи (вид сзади и т. п.) эффекты слабее: это ощущения пилота.
+            float k = s.cam == CamMode::Cockpit ? 1.0f : 0.5f;
+            float frost = (s.cam == CamMode::Cockpit && s.aircraft.Type().kind == AircraftKind::Prop) ? s.aircraft.ice : 0.0f;
+            DrawVisionEffects(s.gGrey * k, s.gRed * k, frost);
         }
 
         MenuAction act = s.menu.Update(s.cfg, s.run, s.aircraft, s.menuTime);

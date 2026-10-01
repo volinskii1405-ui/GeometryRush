@@ -20,6 +20,7 @@ struct Controls {
     bool reverse = false;      // реверс тяги (только на земле)
     bool altGear = false;      // аварийный выпуск шасси (под собственным весом)
     bool fireHandle[2] = {false, false};   // пожарный кран: выключить двигатель и разрядить огнетушитель
+    bool antiIce = false;      // противообледенительная система (крыло, двигатели, ПВД)
 };
 
 enum class Failure { Engine1, Engine2, Fire1, Fire2, GearHydraulics, FlapsJam, FuelLeak, Count };
@@ -87,6 +88,19 @@ public:
     bool onGround = false;        // обжаты стойки шасси
     int wheelsOnGround = 0;
 
+    // ---- окружающая среда (задаёт вызывающий код каждый кадр)
+    float oat = 15;              // температура наружного воздуха, °C
+    bool inCloud = false, inRain = false;
+    bool lastAntiIce = false;    // положение выключателя на последнем шаге (для сигнализации)
+
+    // ---- обледенение и тормоза
+    float ice = 0;               // 0..1: толщина льда на крыле (1 — сильное обледенение)
+    float brakeTemp[2] = {15, 15};   // °C, левые и правые колёса
+    bool tireFlat[2] = {false, false};
+    float IceStallLossDeg() const { return ice * 6.0f; }
+    bool Icing() const { return inCloud && oat < 2.0f && oat > -25.0f; }
+    static constexpr float BRAKES_HOT = 300.0f, FUSE_PLUG = 550.0f;
+
     // ---- повреждения конструкции
     bool lost[(int)Part::Count] = {};   // оторвалось
     bool overstressed = false;   // превышена эксплуатационная перегрузка: остаточная деформация
@@ -135,5 +149,6 @@ private:
     bool failures_[(int)Failure::Count] = {};
     float stallDrop_ = 0;
     float ultimateK_ = 1.5f;   // разрушающая / эксплуатационная (немного разная от полёта к полёту)
-    bool belly_ = false;       // скольжение на брюхе/крыле   // в какую сторону сваливается крыло при срыве
+    bool belly_ = false;       // скольжение на брюхе/крыле
+    float plugHeat_[2] = {0, 0};   // сколько секунд колесо выше температуры плавления пробок   // в какую сторону сваливается крыло при срыве
 };
