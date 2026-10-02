@@ -151,9 +151,9 @@ float Aircraft::SpeedLimitKt() const
 }
 
 Aircraft::Trim Aircraft::ComputeTrim(const AircraftType& t, float mass, float tas, float altM, float flapsDeg,
-                                     bool gearDown, float gammaDeg)
+                                     bool gearDown, float gammaDeg, float rhoScale)
 {
-    const float rho = AirDensity(altM), qd = 0.5f * rho * tas * tas;
+    const float rho = AirDensity(altM) * rhoScale, qd = 0.5f * rho * tas * tas;
     const float ff = FlapFrac(t, flapsDeg), W = mass * G, gam = gammaDeg * DEG2RAD;
     const float mach = tas / SpeedOfSound(altM);
     const float kInduced = 1.0f / (PI * 0.8f * t.span * t.span / t.wingArea);
@@ -174,6 +174,19 @@ Aircraft::Trim Aircraft::ComputeTrim(const AircraftType& t, float mass, float ta
         else hi = mid;
     }
     return Trim{alpha * RAD2DEG, Clampf(elevEff / trimRange, -1, 1), 0.5f * (lo + hi)};
+}
+
+float Aircraft::Density(float altM) const
+{
+    float tIsa = 288.15f - 0.0065f * Clampf(altM, -500.0f, 11000.0f);
+    return AirDensity(altM) * (qnh / 1013.25f) * tIsa / (tIsa + isaDev);
+}
+
+float Aircraft::DensityAltFt() const
+{
+    // Обратная формула стандартной атмосферы: rho = 1.225·(1 − 2.25577e-5·h)^4.2559.
+    float rho = Density(pos.y);
+    return (1.0f - powf(rho / 1.225f, 1.0f / 4.2559f)) / 2.25577e-5f * M_TO_FT;
 }
 
 void Aircraft::Crash(const std::string& reason, bool fire)
@@ -378,7 +391,7 @@ void Aircraft::Step(float dt, const Controls& c, const Terrain& terrain, Vector3
     const Vector3 air = Vector3Subtract(vel, wind);
     const Vector3 vb = Rotate(air, inv);
     const float V = Vector3Length(vb);
-    const float rho = AirDensity(pos.y);
+    const float rho = Density(pos.y);
     const float qd = 0.5f * rho * V * V;
     tas = V;
     ias = V * sqrtf(rho / 1.225f);

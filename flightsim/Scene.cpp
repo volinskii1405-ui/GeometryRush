@@ -350,9 +350,9 @@ void Scene::UpdateCameraBase(const Aircraft& a, CamMode mode, float dt)
     const AircraftType& t = a.Type();
     const float k = t.span / 15.9f;
     // Мышь: в кабине ПКМ — оглядеться, снаружи ЛКМ/ПКМ — вращать, колесо — дистанция.
-    Vector2 md = GetMouseDelta();
-    bool dragging = IsMouseButtonDown(MOUSE_BUTTON_RIGHT) || (mode != CamMode::Cockpit && IsMouseButtonDown(MOUSE_BUTTON_LEFT));
-    float wheel = GetMouseWheelMove();
+    Vector2 md = mouseLocked ? Vector2{} : GetMouseDelta();
+    bool dragging = !mouseLocked && (IsMouseButtonDown(MOUSE_BUTTON_RIGHT) || (mode != CamMode::Cockpit && IsMouseButtonDown(MOUSE_BUTTON_LEFT)));
+    float wheel = mouseLocked ? 0.0f : GetMouseWheelMove();
 
     if (a.crashed && (mode == CamMode::Cockpit || mode == CamMode::Chase)) {
         // После катастрофы — вид со стороны, чтобы камера не оказалась внутри огня.
@@ -367,7 +367,7 @@ void Scene::UpdateCameraBase(const Aircraft& a, CamMode mode, float dt)
 
     switch (mode) {
     case CamMode::Cockpit: {
-        if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) {
+        if (!mouseLocked && IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) {
             lookYaw_ = Clampf(lookYaw_ - md.x * 0.25f, -150.0f, 150.0f);
             lookPitch_ = Clampf(lookPitch_ - md.y * 0.25f, -60.0f, 70.0f);
         } else {

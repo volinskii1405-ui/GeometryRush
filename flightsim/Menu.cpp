@@ -233,11 +233,11 @@ MenuAction Menu::FreeScreen(Config& cfg)
         Open(MenuScreen::Main);
         return {};
     }
-    const int rows = 8;
+    const int rows = 9;
     Nav(sel_, rows + 1);
-    float w = 760 * S, x = (sw - w) * 0.5f, y = 60 * S;
+    float w = 760 * S, x = (sw - w) * 0.5f, y = 40 * S;
     ui::Draw(L("Free flight", "Свободный полёт"), x, y, 40 * S, WHITE, true);
-    y += 70 * S;
+    y += 62 * S;
     const Airport& ap = world::GetAirport(cfg.freeAirport % world::AirportCount());
     const AircraftType& at = GetAircraftType((AircraftKind)cfg.freeAircraft);
     std::string starts[5] = {
@@ -255,20 +255,21 @@ MenuAction Menu::FreeScreen(Config& cfg)
         {L("Time of day", "Время суток"), Environment::TimeName((TimeOfDay)cfg.freeTime), &cfg.freeTime, (int)TimeOfDay::Count},
         {L("Weather", "Погода"), Environment::WeatherName((WeatherKind)cfg.freeWeather), &cfg.freeWeather, (int)WeatherKind::Count},
         {L("Wind", "Ветер"), WindName(cfg.freeWind), &cfg.freeWind, 4},
+        {L("Temperature", "Температура"), Environment::TempName(cfg.freeTemp % 3), &cfg.freeTemp, 3},
         {L("Fuel", "Топливо"), fuels[cfg.freeFuel % 4], &cfg.freeFuel, 4},
         {L("Failures", "Отказы"), cfg.freeFailures ? L("Random", "Случайные") : L("Off", "Нет"), &cfg.freeFailures, 2},
     };
     for (int i = 0; i < rows; ++i) {
-        Rectangle rr{x, y + i * 56 * S, w, 48 * S};
+        Rectangle rr{x, y + i * 52 * S, w, 46 * S};
         if (CheckCollisionPointRec(GetMousePosition(), rr)) sel_ = i;
         int d = OptionRow(rr, r[i].label, r[i].value.c_str(), sel_ == i);
         if (d) *r[i].var = (*r[i].var + d + r[i].count) % r[i].count;
     }
     MenuAction act;
-    Rectangle go{x + w - 300 * S, y + rows * 56 * S + 20 * S, 300 * S, 54 * S};
+    Rectangle go{x + w - 300 * S, y + rows * 52 * S + 14 * S, 300 * S, 54 * S};
     if (CheckCollisionPointRec(GetMousePosition(), go)) sel_ = rows;
     if (Button(go, L("Fly!  (Enter)", "Полетели!  (Enter)"), sel_ == rows, 24) || Enter()) act.kind = MenuAction::StartFree;
-    if (Button({x, y + rows * 56 * S + 20 * S, 200 * S, 54 * S}, L("Back (Esc)", "Назад (Esc)"), false)) Open(MenuScreen::Main);
+    if (Button({x, y + rows * 52 * S + 14 * S, 200 * S, 54 * S}, L("Back (Esc)", "Назад (Esc)"), false)) Open(MenuScreen::Main);
     (void)sh;
     return act;
 }

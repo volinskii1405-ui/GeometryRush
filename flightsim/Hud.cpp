@@ -16,6 +16,7 @@ namespace {
 
 float S = 1.0f;   // масштаб интерфейса (высота окна / 900)
 const Autopilot* g_ap = nullptr;   // автопилот/директор текущего кадра
+float g_baro = 1013.0f;            // установка высотомера текущего кадра
 int Fs(float px) { return (int)(px * S + 0.5f); }
 
 const Color kPanel{14, 16, 20, 225};
@@ -211,7 +212,8 @@ void DrawSpeedTape(const Aircraft& a, float x, float cy, float wdt, float hgt, f
 
 void DrawAltTape(const Aircraft& a, const Terrain& t, float x, float cy, float wdt, float hgt)
 {
-    const float alt = a.pos.y * M_TO_FT;
+    const float baroErr = (g_baro - a.qnh) * 27.3f;   // ошибка высотомера от неверной установки давления
+    const float alt = a.pos.y * M_TO_FT + baroErr;
     const float ppf = 0.3f * S;
     const float top = cy - hgt * 0.5f;
     auto Y = [&](float ft) { return cy - (ft - alt) * ppf; };
@@ -219,7 +221,7 @@ void DrawAltTape(const Aircraft& a, const Terrain& t, float x, float cy, float w
     DrawRectangle((int)x, (int)top, (int)wdt, (int)hgt, kTape);
     BeginScissorMode((int)x, (int)top, (int)wdt, (int)hgt);
     // Земля под самолётом
-    float groundFt = t.SurfaceHeight(a.pos.x, a.pos.z) * M_TO_FT;
+    float groundFt = t.SurfaceHeight(a.pos.x, a.pos.z) * M_TO_FT + baroErr;
     float gy = Y(groundFt);
     if (gy < top + hgt) {
         DrawRectangle((int)x, (int)gy, (int)(10 * S), (int)(top + hgt - gy), kAmber);
@@ -250,6 +252,10 @@ void DrawAltTape(const Aircraft& a, const Terrain& t, float x, float cy, float w
     TextR(buf, x + wdt - 6 * S, cy - 9 * S, 20, WHITE);
     if (g_ap) TextC(TextFormat("ALT %d", (int)g_ap->altTarget), x + wdt * 0.5f, top - 16 * S, 13, kCyan);
     else TextC("ALT ft", x + wdt * 0.5f, top - 16 * S, 12, kCyan);
+    // Установка высотомера: STD или давление в гПа; жёлтая, если ниже 5000 ft она не совпадает с давлением района.
+    bool std1013 = fabsf(g_baro - 1013.0f) < 0.5f;
+    bool wrong = fabsf(g_baro - a.qnh) > 1.5f && a.pos.y * M_TO_FT < 5000.0f;
+    TextC(std1013 ? "STD" : TextFormat("QNH %d", (int)roundf(g_baro)), x + wdt * 0.5f, top + hgt + 4 * S, 13, wrong ? kAmber : kCyan);
 }
 
 void DrawVsi(const Aircraft& a, float x, float cy, float wdt, float hgt)
@@ -310,6 +316,10 @@ void DrawHeadingTape(const Aircraft& a, float cx, float y, float wdt, float hgt)
         float bx = cx + Clampf(WrapDeg180(g_ap->hdgBug - hdg) * ppd, -wdt * 0.5f + 5 * S, wdt * 0.5f - 5 * S);
         DrawRectangle((int)(bx - 5 * S), (int)y, (int)(10 * S), (int)(5 * S), kCyan);
         DrawRectangle((int)(bx - 2 * S), (int)y, (int)(4 * S), (int)(9 * S), kCyan);
+    }
+    if (g_ap && g_ap->navOn) {   // заданный путевой угол маршрута — пурпурная метка
+        float nx = cx + Clampf(WrapDeg180(g_ap->navTrack - hdg) * ppd, -wdt * 0.5f + 5 * S, wdt * 0.5f - 5 * S);
+        DrawTriangle({nx, y + 10 * S}, {nx + 5 * S, y + 2 * S}, {nx - 5 * S, y + 2 * S}, Color{230, 80, 230, 255});
     }
     // Путевой угол (куда реально движемся) — зелёный ромб.
     if (sqrtf(a.vel.x * a.vel.x + a.vel.z * a.vel.z) > 5.0f) {
@@ -550,6 +560,11 @@ void DrawEcam(const Aircraft& a, float x, float y, float w)
                             L("Fuse plug released: hold straight with rudder", "Сработала плавкая пробка: держите педалями"), kAmber});
     if (fmaxf(a.brakeTemp[0], a.brakeTemp[1]) > Aircraft::BRAKES_HOT)
         msgs.push_back({"BRAKES HOT", L("Let them cool; over 550 C the tires deflate", "Дайте остыть; выше 550 °C спускают шины"), kAmber});
+    if (fabsf(g_baro - a.qnh) > 1.5f && a.pos.y * M_TO_FT < 5000.0f && !a.onGround) {
+        char bb[40];
+        snprintf(bb, sizeof bb, "BARO %+d FT", (int)roundf((g_baro - a.qnh) * 27.3f));
+        msgs.push_back({bb, TextFormat(L("Set QNH %d: F5/F6, F7 - STD/QNH", "Выставьте QNH %d: F5/F6, F7 — STD/QNH"), (int)roundf(a.qnh)), kAmber});
+    }
     if (a.tailStrike) msgs.push_back({"TAIL STRIKE", L("Lower pitch on rotation/flare", "Меньше тангаж при отрыве и выравнивании"), kAmber});
     for (const Msg& m : msgs) {
         Text(m.title.c_str(), x, y, 15, m.c);
@@ -690,7 +705,8 @@ void DrawFma(float x, float y)
     const char* thr = ap.athrOn ? (ap.retard ? "RETARD" : (ap.vert == Autopilot::Vert::GoAround || ap.vert == Autopilot::Vert::TakeOff ? "TOGA" : "SPEED")) : "MAN THR";
     box(TextFormat("A/THR %s", thr), ap.athrOn ? kGreen : Color{150, 150, 150, 255}, nullptr, 150 * S);
     const char* latArmed = (ap.appArmed && !ap.locCaptured) ? "LOC" : nullptr;
-    box(ap.lat == Autopilot::Lat::Loc ? "LOC" : TextFormat("HDG %03d", (int)ap.hdgBug % 360), kGreen, latArmed, 110 * S);
+    box(ap.lat == Autopilot::Lat::Loc ? "LOC" : ap.lat == Autopilot::Lat::Nav ? "NAV" : TextFormat("HDG %03d", (int)ap.hdgBug % 360), kGreen,
+        latArmed, 110 * S);
     const char* vertArmed = ((ap.appArmed || ap.locCaptured) && !ap.gsCaptured) ? "G/S" : nullptr;
     const char* vert = "";
     switch (ap.vert) {
@@ -744,6 +760,7 @@ std::vector<std::string> HelpLines(const Aircraft& a)
         L("Gear: G   Alternate gear: H   Brakes: Space/B   Parking brake: P", "Шасси: G   Аварийный выпуск: H   Тормоза: Space/B   Стояночный: P"),
         L("Speed brake: / or K   Fire handle: J   Camera: C (mouse to look)", "Интерцепторы: / или K   Пожарный кран: J   Камера: C (мышь — обзор)"),
         L("Anti-ice: I (in cloud below +2 C)   Watch brake temperature: BRK", "Обогрев от обледенения: I (в облаке ниже +2 °C)   Температура тормозов: BRK"),
+        L("Map and route: N   NAV (fly the route): F2   Altimeter: F5/F6, F7 STD/QNH", "Карта и маршрут: N   NAV (по маршруту): F2   Высотомер: F5/F6, F7 STD/QNH"),
         L("Autopilot: T - AP, Y - auto throttle, L - ILS, U - V/S, O - FD", "Автопилот: T — AP, Y — автомат тяги, L — ILS, U — V/S, O — директор"),
         L("Targets: 9/0 heading, -/= altitude, ,/. speed, ;/' vertical speed", "Задатчики: 9/0 курс, -/= высота, ,/. скорость, ;/' вертикальная"),
         L("Wind: F8   Pause/menu: Esc   Restart: R", "Ветер: F8   Пауза/меню: Esc   Заново: R"),
@@ -810,6 +827,7 @@ void DrawHud(const Aircraft& a, const Controls& c, const WarningSystem& w, const
     const int sw = GetScreenWidth(), sh = GetScreenHeight();
     S = fminf(sh / 900.0f, sw / 1500.0f);
     g_ap = info.ap;
+    g_baro = c.baro;
     if (S < 0.5f) S = 0.5f;
 
     static float prevIas = 0, trend = 0;
@@ -859,9 +877,21 @@ void DrawHud(const Aircraft& a, const Controls& c, const WarningSystem& w, const
         snprintf(buf, sizeof buf, L("Wind %s (F8)   %s", "Ветер %s (F8)   %s"), info.windName,
                  info.gamepad ? L("gamepad", "геймпад") : (info.mouseYoke ? L("mouse yoke", "штурвал-мышь") : L("keyboard", "клавиатура")));
         Text(buf, ix, panelTop + 34 * S, 12, Color{180, 184, 190, 255});
-        snprintf(buf, sizeof buf, "VS %d   VLIM %d kt", (int)a.StallSpeedKt(), (int)a.SpeedLimitKt());
+        snprintf(buf, sizeof buf, "VS %d   VLIM %d kt   QNH %d   DA %d ft", (int)a.StallSpeedKt(), (int)a.SpeedLimitKt(), (int)roundf(a.qnh),
+                 (int)(a.DensityAltFt() / 10.0f) * 10);
         Text(buf, ix, panelTop + 52 * S, 12, Color{150, 154, 160, 255});
-        DrawEcam(a, ix, panelTop + 78 * S, sw - ix - 14 * S);
+        float ecamY = panelTop + 78 * S;
+        if (g_ap && g_ap->RouteActive()) {   // следующая точка маршрута
+            const Waypoint& w = g_ap->route[g_ap->activeWp];
+            float gsMs = sqrtf(a.vel.x * a.vel.x + a.vel.z * a.vel.z);
+            int ete = gsMs > 10.0f ? (int)(g_ap->navDistM / gsMs) : 0;
+            snprintf(buf, sizeof buf, "%s %s  %.1f NM  %03d°%s%s", g_ap->navOn ? "NAV" : "WPT", w.name, g_ap->navDistM / 1852.0f,
+                     (int)roundf(g_ap->navTrack) % 360, ete ? TextFormat("  %d:%02d", ete / 60, ete % 60) : "",
+                     w.altFt > 0 ? TextFormat("  %d ft", (int)w.altFt) : "");
+            Text(buf, ix, panelTop + 68 * S, 12, Color{230, 80, 230, 255});
+            ecamY += 12 * S;
+        }
+        DrawEcam(a, ix, ecamY, sw - ix - 14 * S);
         Text(L("F1 - help   T - autopilot   Esc - menu", "F1 — справка   T — автопилот   Esc — меню"), ix, panelTop + panelH - 26 * S, 12,
              Color{150, 154, 160, 255});
     }

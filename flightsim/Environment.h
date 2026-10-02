@@ -21,6 +21,18 @@ struct Environment {
     bool night = false, dusk = false;    // ночные огни; огни в сумерках
     bool showSun = true;
     float seaTempC = 15;       // температура у моря; с высотой падает на 6.5 °C/км
+    float qnh = 1013.0f;       // давление у моря, гПа (сообщает диспетчер)
+    float thermals = 0;        // сила термиков 0..1.5 (солнце греет сушу)
+
+    float IsaDev() const { return seaTempC - 15.0f; }
+    static const char* TempName(int t)
+    {
+        switch (t) {
+        case 1: return ui::L("Heat (+20 C above standard)", "Жара (на 20 °C теплее нормы)");
+        case 2: return ui::L("Frost (-20 C below standard)", "Мороз (на 20 °C холоднее нормы)");
+        default: return ui::L("Standard", "Обычная");
+        }
+    }
 
     float OatAt(float altM) const { return seaTempC - 0.0065f * altM; }
     bool InCloud(float altM) const { return overcast && altM > cloudBase && altM < cloudTop; }
@@ -46,7 +58,8 @@ struct Environment {
         }
     }
 
-    static Environment Make(TimeOfDay t, WeatherKind w)
+    // temp: 0 — обычная температура, 1 — жара, 2 — мороз.
+    static Environment Make(TimeOfDay t, WeatherKind w, int temp = 0)
     {
         Environment e;
         e.time = t;
@@ -123,6 +136,21 @@ struct Environment {
         if (w == WeatherKind::Overcast) e.seaTempC -= 2.0f;
         if (w == WeatherKind::Rain) e.seaTempC = fmaxf(e.seaTempC - 5.0f, 2.0f);
         if (w == WeatherKind::Fog) e.seaTempC -= 1.0f;
+        if (temp == 1) e.seaTempC += 20.0f;
+        if (temp == 2) e.seaTempC -= 20.0f;
+        // Антициклон — ясно и давление высокое, циклон — дождь и низкое.
+        switch (w) {
+        case WeatherKind::Clear: e.qnh = 1022; break;
+        case WeatherKind::Scattered: e.qnh = 1015; break;
+        case WeatherKind::Overcast: e.qnh = 1006; break;
+        case WeatherKind::Rain: e.qnh = 996; break;
+        default: e.qnh = 1019; break;
+        }
+        // Термики: днём над сушей при ясной погоде или кучевых облаках (их «вершины» — облака).
+        if (w == WeatherKind::Clear || w == WeatherKind::Scattered)
+            e.thermals = t == TimeOfDay::Day ? 1.0f : (t == TimeOfDay::Sunset ? 0.3f : 0.0f);
+        if (temp == 1) e.thermals *= 1.4f;
+        if (temp == 2) e.thermals *= 0.5f;
         e.fogColor = e.horizon;
         if (e.overcast && !e.night) e.dusk = e.dusk || w == WeatherKind::Fog || w == WeatherKind::Rain;
         return e;

@@ -1,6 +1,8 @@
 #pragma once
 #include "Ils.h"
 
+#include <vector>
+
 class Terrain;
 struct Controls;
 
@@ -9,9 +11,16 @@ struct Controls;
 // Директор работает всегда (если включён): по выбранным режимам считает, куда поставить нос
 // и какой держать крен, и показывает это пурпурными планками на авиагоризонте.
 // Автопилот (AP) сам выполняет эти команды штурвалом и триммером, автомат тяги (A/THR) держит скорость.
+// Точка маршрута (FMS): положение, имя и рекомендуемая высота (0 — нет).
+struct Waypoint {
+    Vector3 pos{};
+    char name[12] = "";
+    float altFt = 0;
+};
+
 class Autopilot {
 public:
-    enum class Lat { Hdg, Loc };
+    enum class Lat { Hdg, Loc, Nav };
     enum class Vert { TakeOff, Alt, Gs, Vs, GoAround };
 
     // Установка целей при старте сценария.
@@ -29,6 +38,17 @@ public:
     // Отключение автопилота: пилот взялся за штурвал, срабатывание защиты или малая высота.
     void DisconnectAp(const char* reason);
     void DisconnectAthr();
+
+    // ---- маршрут (бортовой компьютер, FMS) и режим NAV: автопилот ведёт по точкам
+    std::vector<Waypoint> route;
+    int activeWp = 0;                 // к какой точке летим (== route.size() — маршрут пройден)
+    bool navOn = false;
+    float navTrack = 0, navDistM = 0; // заданный путевой угол и расстояние до активной точки
+    void ToggleNav(const Aircraft& a);
+    void AddWaypoint(Vector3 pos, const char* name, float altFt);
+    void RemoveLastWaypoint();
+    void ClearRoute();
+    bool RouteActive() const { return activeWp < (int)route.size(); }
 
     // ---- выбранные значения (задатчики на панели)
     float hdgBug = 90, altTarget = 3000, spdTarget = 180, vsTarget = 0;
@@ -53,4 +73,5 @@ public:
 private:
     bool takeoff_ = false, goAround_ = false, vsMode_ = false;
     float prevIas_ = 0, accelKt_ = 0;
+    float baro_ = 1013.0f;   // установка высотомера: автопилот держит высоту по нему, как в жизни
 };

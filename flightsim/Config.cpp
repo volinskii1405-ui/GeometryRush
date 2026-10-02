@@ -32,6 +32,7 @@ void Config::Load()
         else if (key == "free_wind") freeWind = v;
         else if (key == "free_fuel") freeFuel = v;
         else if (key == "free_failures") freeFailures = v;
+        else if (key == "free_temp") freeTemp = v;
         else if (key.rfind("stars.", 0) == 0) stars[key.substr(6)] = v;
     }
     fclose(f);
@@ -44,7 +45,7 @@ void Config::Save() const
     fprintf(f, "lang_ru=%d\nmouse_yoke=%d\nshow_fps=%d\nvolume=%d\n", ru, mouseYoke, showFps, volume);
     fprintf(f, "free_aircraft=%d\nfree_airport=%d\nfree_start=%d\nfree_time=%d\nfree_weather=%d\nfree_wind=%d\n", freeAircraft,
             freeAirport, freeStart, freeTime, freeWeather, freeWind);
-    fprintf(f, "free_fuel=%d\nfree_failures=%d\n", freeFuel, freeFailures);
+    fprintf(f, "free_fuel=%d\nfree_failures=%d\nfree_temp=%d\n", freeFuel, freeFailures, freeTemp);
     for (const auto& kv : stars) fprintf(f, "stars.%s=%d\n", kv.first.c_str(), kv.second);
     fclose(f);
 }

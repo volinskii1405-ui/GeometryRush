@@ -21,6 +21,7 @@ struct Controls {
     bool altGear = false;      // аварийный выпуск шасси (под собственным весом)
     bool fireHandle[2] = {false, false};   // пожарный кран: выключить двигатель и разрядить огнетушитель
     bool antiIce = false;      // противообледенительная система (крыло, двигатели, ПВД)
+    float baro = 1013.0f;      // давление, выставленное на высотомере, гПа (1013 — стандарт, STD)
 };
 
 enum class Failure { Engine1, Engine2, Fire1, Fire2, GearHydraulics, FlapsJam, FuelLeak, Count };
@@ -92,6 +93,14 @@ public:
     float oat = 15;              // температура наружного воздуха, °C
     bool inCloud = false, inRain = false;
     bool lastAntiIce = false;    // положение выключателя на последнем шаге (для сигнализации)
+    float qnh = 1013.25f;        // давление на уровне моря, гПа
+    float isaDev = 0;            // отклонение температуры от стандартной атмосферы, °C
+    // Плотность воздуха: давление по QNH, температура — со сдвигом от стандартной.
+    float Density(float altM) const;
+    // Высота по барометрическому высотомеру: ошибка ~27 ft на каждый гПа неверной установки.
+    float AltimeterFt(float baroHpa) const { return pos.y * fs::M_TO_FT + (baroHpa - qnh) * 27.3f; }
+    // Высота по плотности: на какой высоте стандартной атмосферы такая же плотность (характеристики самолёта).
+    float DensityAltFt() const;
 
     // ---- обледенение и тормоза
     float ice = 0;               // 0..1: толщина льда на крыле (1 — сильное обледенение)
@@ -134,7 +143,7 @@ public:
     // Балансировочный режим для горизонтального/наклонного полёта (для старта в воздухе).
     struct Trim { float alphaDeg, trim, throttle; };
     static Trim ComputeTrim(const AircraftType& t, float mass, float tasMs, float altM, float flapsDeg,
-                            bool gearDown, float gammaDeg);
+                            bool gearDown, float gammaDeg, float rhoScale = 1.0f);
 
     float StallSpeedKt() const;   // скорость сваливания (приборная) при текущих массе и закрылках
     float SpeedLimitKt() const;   // текущее ограничение: VMO / VFE / VLE

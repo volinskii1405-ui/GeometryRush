@@ -28,7 +28,8 @@ public:
               bool showAircraft = true);
 
     Camera3D camera{};
-    float crashAge = -1;   // секунд после катастрофы (для огня и дыма)
+    float crashAge = -1;
+    bool mouseLocked = false;   // мышь занята (открыта карта): камера её не слушает   // секунд после катастрофы (для огня и дыма)
 
 private:
     void DrawSky();

@@ -18,6 +18,7 @@ struct FlightSetup {
     TimeOfDay time = TimeOfDay::Day;
     WeatherKind weather = WeatherKind::Clear;
     int wind = 0;
+    int temp = 0;                      // 0 — обычная, 1 — жара, 2 — мороз
     StartKind start = StartKind::Runway;
     int airport = 0, end = 0;          // аэродром и торец ВПП старта/захода
     float finalNm = 6;                 // удаление при старте на заходе

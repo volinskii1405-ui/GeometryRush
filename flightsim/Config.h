@@ -11,7 +11,7 @@ struct Config {
 
     // последний выбор свободного полёта
     int freeAircraft = 0, freeAirport = 0, freeStart = 0, freeTime = 0, freeWeather = 0, freeWind = 0;
-    int freeFuel = 2, freeFailures = 0;
+    int freeFuel = 2, freeFailures = 0, freeTemp = 0;
 
     std::map<std::string, int> stars;   // лучший результат задания (0..3)
 

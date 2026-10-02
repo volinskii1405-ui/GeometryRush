@@ -86,6 +86,7 @@ add_executable(FlightSim
     flightsim/Effects.cpp
     flightsim/Missions.cpp
     flightsim/Menu.cpp
+    flightsim/Map.cpp
     flightsim/Config.cpp
     flightsim/UiText.cpp
     flightsim/Audio.cpp

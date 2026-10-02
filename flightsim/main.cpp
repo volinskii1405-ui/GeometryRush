@@ -8,6 +8,7 @@
 #include "Config.h"
 #include "Effects.h"
 #include "Hud.h"
+#include "Map.h"
 #include "Menu.h"
 #include "Missions.h"
 #include "Scene.h"
@@ -52,6 +53,9 @@ struct Sim {
     Config cfg;
     Menu menu;
     MissionRun run;
+    NavMap map;
+    std::vector<Vector2> trail;   // пройденный путь для карты
+    float trailTimer = 0;
     FlightSetup setup;
 
     bool flying = false;       // идёт полёт (иначе — фон меню)
@@ -69,10 +73,45 @@ struct Sim {
     bool quit = false;
 };
 
+// Термики: солнце греет сушу, тёплый воздух поднимается столбами диаметром 300–600 м
+// (2–4 м/с в ядре, вокруг — слабое опускание). Над морем их нет, вверху их «срезает» облачность.
+float ThermalLift(const Sim& s, Vector3 pos)
+{
+    const float k = s.env.thermals;
+    if (k <= 0.0f) return 0.0f;
+    const float ground = s.terrain.GroundHeight(pos.x, pos.z);
+    if (ground < 2.0f) return 0.0f;
+    const float agl = pos.y - ground;
+    const float top = Clampf(s.env.clouds ? s.env.cloudBase - ground : 1400.0f, 300.0f, 1800.0f);
+    if (agl <= 0.0f || agl > top) return 0.0f;
+    const float cell = 1400.0f;
+    const int ci = (int)floorf(pos.x / cell), cj = (int)floorf(pos.z / cell);
+    float lift = 0.0f;
+    for (int dj = -1; dj <= 1; ++dj)
+        for (int di = -1; di <= 1; ++di) {
+            unsigned h = (unsigned)(ci + di) * 73856093u ^ (unsigned)(cj + dj) * 19349663u;
+            h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+            float r1 = (h & 1023) / 1023.0f, r2 = ((h >> 10) & 1023) / 1023.0f, r3 = ((h >> 20) & 1023) / 1023.0f;
+            if (r3 < 0.35f) continue;   // в этой клетке термика нет
+            float cx = (ci + di + 0.2f + 0.6f * r1) * cell, cz = (cj + dj + 0.2f + 0.6f * r2) * cell;
+            // Термик «дышит»: усиливается и слабеет за несколько минут.
+            float strength = (1.0f + 2.5f * (r3 - 0.35f) / 0.65f) *
+                             (0.6f + 0.4f * sinf(s.time * 2.0f * PI / (300.0f + 200.0f * r1) + r2 * 6.28f));
+            float radius = 170.0f + 150.0f * r2;
+            float dx = pos.x - cx, dz = pos.z - cz;
+            float d2 = (dx * dx + dz * dz) / (radius * radius);
+            lift += strength * (expf(-d2) - 0.25f * expf(-d2 / 6.0f));
+        }
+    return lift * k * SmoothStep(20.0f, 250.0f, agl) * (1.0f - SmoothStep(top * 0.75f, top, agl));
+}
+
 Vector3 WindAt(const Sim& s, Vector3 pos)
 {
+    float lift = ThermalLift(s, pos);
+    // В термике слегка болтает.
+    Vector3 thermal{0.25f * lift * sinf(s.time * 2.3f + pos.x * 0.01f), lift, 0.25f * lift * sinf(s.time * 1.9f + pos.z * 0.01f)};
     const WindPreset& w = kWinds[s.wind];
-    if (w.speedKt <= 0.0f) return {};
+    if (w.speedKt <= 0.0f) return thermal;
     float agl = pos.y - s.terrain.SurfaceHeight(pos.x, pos.z);
     float layer = 0.65f + 0.35f * SmoothStep(0.0f, 600.0f, agl);   // у земли ветер слабее
     float t = s.time;
@@ -84,7 +123,7 @@ Vector3 WindAt(const Sim& s, Vector3 pos)
     v.x += tb * (sinf(t * 1.3f) + 0.6f * sinf(t * 2.9f + 1.0f) + 0.3f * sinf(t * 6.1f + 2.0f));
     v.y += tb * 0.8f * (sinf(t * 1.7f + 0.5f) + 0.5f * sinf(t * 3.7f + 2.2f) + 0.3f * sinf(t * 7.3f));
     v.z += tb * (sinf(t * 1.1f + 2.0f) + 0.6f * sinf(t * 3.3f) + 0.3f * sinf(t * 5.7f + 1.0f));
-    return v;
+    return Vector3Add(v, thermal);
 }
 
 // Свободный полёт из выбранных в меню параметров.
@@ -97,6 +136,7 @@ FlightSetup FreeSetup(const Config& cfg)
     s.time = (TimeOfDay)cfg.freeTime;
     s.weather = (WeatherKind)cfg.freeWeather;
     s.wind = cfg.freeWind;
+    s.temp = cfg.freeTemp % 3;
     s.fuelFrac = 0.25f * (cfg.freeFuel % 4 + 1);
     s.fail = cfg.freeFailures ? FailPlan::Random : FailPlan::None;
     s.goal = GoalKind::None;
@@ -127,14 +167,17 @@ void SyncEnvironment(Sim& s)
     a.oat = s.env.OatAt(a.pos.y);
     a.inCloud = s.env.InCloud(a.pos.y);
     a.inRain = s.env.rain && a.pos.y < s.env.cloudTop;
+    a.qnh = s.env.qnh;
+    a.isaDev = s.env.IsaDev();
 }
 
 void StartFlight(Sim& s, const FlightSetup& setup)
 {
+    const bool restart = &setup == &s.setup;   // R — тот же полёт заново: маршрут сохраняется
     s.setup = setup;
     s.aircraft.SetType(setup.aircraft);
     const AircraftType& t = s.aircraft.Type();
-    s.env = Environment::Make(setup.time, setup.weather);
+    s.env = Environment::Make(setup.time, setup.weather, setup.temp);
     s.scene.SetEnvironment(s.env);
     s.fx.SetEnvironment(s.env);
     s.fx.Clear();
@@ -145,6 +188,13 @@ void StartFlight(Sim& s, const FlightSetup& setup)
     const float mass = t.emptyMass + t.payload + (setup.fuelFrac < 0 ? t.defaultFuel : t.maxFuel * setup.fuelFrac);
     const float fuel = setup.fuelFrac < 0 ? -1.0f : t.maxFuel * setup.fuelFrac;
     Controls c;
+    // Плотность с учётом давления и температуры дня — для балансировки при старте в воздухе.
+    auto rhoScale = [&](float altM) {
+        float tIsa = 288.15f - 0.0065f * altM;
+        return (s.env.qnh / 1013.25f) * tIsa / (tIsa + s.env.IsaDev());
+    };
+    // Высотомер: на земле и на заходе выставлено давление аэродрома (QNH), в полёте — стандартное 1013.
+    c.baro = setup.start == StartKind::Air ? 1013.0f : roundf(s.env.qnh);
     switch (setup.start) {
     case StartKind::Runway: {
         Vector3 d = rw.Dir(setup.end);
@@ -167,8 +217,8 @@ void StartFlight(Sim& s, const FlightSetup& setup)
         bool flapsJam = setup.fail == FailPlan::FlapsJam;
         c.flapsLever = flapsJam ? 0 : 2;
         c.gearDown = !gearFail;
-        float v = (t.approachKt + (flapsJam ? 45.0f : 10.0f)) * KT_TO_MS * sqrtf(1.225f / AirDensity(y));
-        Aircraft::Trim tr = Aircraft::ComputeTrim(t, mass, v, y, t.flapDeg[c.flapsLever], c.gearDown, -glide);
+        float v = (t.approachKt + (flapsJam ? 45.0f : 10.0f)) * KT_TO_MS * sqrtf(1.225f / (AirDensity(y) * rhoScale(y)));
+        Aircraft::Trim tr = Aircraft::ComputeTrim(t, mass, v, y, t.flapDeg[c.flapsLever], c.gearDown, -glide, rhoScale(y));
         c.throttle = tr.throttle;
         c.trim = tr.trim;
         s.aircraft.Reset({p.x, y, p.z}, rw.Course(setup.end), v, false, c, tr.alphaDeg - glide, -glide, fuel);
@@ -188,15 +238,19 @@ void StartFlight(Sim& s, const FlightSetup& setup)
         yM = fmaxf(yM, s.terrain.SurfaceHeight(p.x, p.z) + 250.0f);
         c.flapsLever = 0;
         c.gearDown = false;
-        float v = setup.airSpeedKt * KT_TO_MS * sqrtf(1.225f / AirDensity(yM));
-        Aircraft::Trim tr = Aircraft::ComputeTrim(t, mass, v, yM, 0, !t.retractableGear, 0);
+        float v = setup.airSpeedKt * KT_TO_MS * sqrtf(1.225f / (AirDensity(yM) * rhoScale(yM)));
+        Aircraft::Trim tr = Aircraft::ComputeTrim(t, mass, v, yM, 0, !t.retractableGear, 0, rhoScale(yM));
         c.throttle = tr.throttle;
         c.trim = tr.trim;
         s.aircraft.Reset({p.x, yM, p.z}, hdg, v, false, c, tr.alphaDeg, 0, fuel);
-        s.ap.Reset(hdg, roundf(yM * M_TO_FT / 100.0f) * 100.0f, setup.airSpeedKt, false, false);
+        // Заданная высота — по показаниям высотомера (установлено 1013, а не давление района).
+        s.ap.Reset(hdg, roundf((yM * M_TO_FT + (c.baro - s.env.qnh) * 27.3f) / 100.0f) * 100.0f, setup.airSpeedKt, false, false);
         break;
     }
     }
+    if (!restart) s.ap.ClearRoute();
+    s.trail.clear();
+    s.trailTimer = 0;
     s.ctl = c;
     SyncEnvironment(s);
     for (float& b : s.aircraft.brakeTemp) b = s.aircraft.oat;
@@ -281,7 +335,7 @@ void HandleFlightInput(Sim& s, float dt)
     // Любое заметное движение штурвала отключает автопилот (как усилие на штурвале).
     if (s.ap.apOn) {
         bool manual = kPitch != 0 || kRoll != 0 || (s.gamepad && (fabsf(gp) > 0.3f || fabsf(gr) > 0.3f));
-        if (s.mouseYoke && !s.gamepad) {
+        if (s.mouseYoke && !s.map.open && !s.gamepad) {
             Vector2 m = GetMousePosition();
             float range = GetScreenHeight() * 0.3f;
             manual = manual || fabsf(m.y - GetScreenHeight() * 0.4f) > range * 0.6f || fabsf(m.x - GetScreenWidth() * 0.5f) > range * 0.6f;
@@ -295,7 +349,7 @@ void HandleFlightInput(Sim& s, float dt)
         c.pitch = gp;
         c.roll = gr;
         c.yaw = gy;
-    } else if (s.mouseYoke) {
+    } else if (s.mouseYoke && !s.map.open) {
         Vector2 m = GetMousePosition();
         float range = GetScreenHeight() * 0.3f;
         c.pitch = Clampf((m.y - GetScreenHeight() * 0.4f) / range, -1, 1);
@@ -373,6 +427,12 @@ void HandleFlightInput(Sim& s, float dt)
     }
     if (IsKeyPressed(KEY_P)) { c.parkingBrake = !c.parkingBrake; s.audio.PlayClick(); }
     if (IsKeyPressed(KEY_I)) { c.antiIce = !c.antiIce; s.audio.PlayClick(); }   // противообледенительная система
+    if (IsKeyPressed(KEY_N)) s.map.open = !s.map.open;
+    if (IsKeyPressed(KEY_F2)) { s.ap.ToggleNav(a); s.audio.PlayClick(); }
+    // Высотомер: F5/F6 — давление ±1 гПа, F7 — стандартное 1013 (STD) / давление района (QNH).
+    if (step(KEY_F5)) c.baro = fmaxf(c.baro - 1.0f, 940.0f);
+    if (step(KEY_F6)) c.baro = fminf(c.baro + 1.0f, 1060.0f);
+    if (IsKeyPressed(KEY_F7)) c.baro = fabsf(c.baro - 1013.0f) < 0.5f ? roundf(s.env.qnh) : 1013.0f;
     if (IsKeyPressed(KEY_SLASH) || IsKeyPressed(KEY_K) || IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT)) {
         c.speedbrake = !c.speedbrake;
         s.audio.PlayClick();
@@ -419,6 +479,12 @@ void UpdateFlight(Sim& s, float dt)
         s.gRed = MoveTowards(s.gRed, tr, (tr > s.gRed ? 0.6f : 0.8f) * dt);
     }
     s.touchdownTimer = fmaxf(s.touchdownTimer - dt, 0.0f);
+    s.trailTimer -= dt;
+    if (s.trailTimer <= 0.0f && !s.aircraft.crashed && Vector3Length(s.aircraft.vel) > 2.0f) {
+        s.trailTimer = 2.0f;
+        if (s.trail.size() > 4000) s.trail.erase(s.trail.begin(), s.trail.begin() + 1000);
+        s.trail.push_back({s.aircraft.pos.x, s.aircraft.pos.z});
+    }
     s.warnings.Update(s.aircraft, s.terrain, dt);
     s.callouts.Update(s.aircraft, s.warnings.radioAltFt, s.ctl, dt);
     s.fx.Update(s.aircraft, s.env, WindAt(s, s.aircraft.pos), dt, touchdown);
@@ -469,6 +535,7 @@ int main()
     s.terrain.Generate(1337u);
     s.terrain.BuildMeshes(s.scene.LitShader());
     s.scene.BuildWorld(s.terrain);
+    s.map.Build(s.terrain);
     ShowMenu(s, MenuScreen::Main);
 
     while (!WindowShouldClose() && !s.quit) {
@@ -478,7 +545,8 @@ int main()
         bool menuOpen = s.menu.Screen() != MenuScreen::None;
         if (s.flying && !menuOpen) {
             if (IsKeyPressed(KEY_ESCAPE)) {
-                if (s.help) s.help = false;
+                if (s.map.open) s.map.open = false;
+                else if (s.help) s.help = false;
                 else {
                     s.paused = true;
                     s.menu.Open(MenuScreen::Pause);
@@ -497,6 +565,8 @@ int main()
         }
         s.audio.Update(s.aircraft, s.ctl, s.warnings, s.callouts, !sounding);
         s.scene.crashAge = s.crashAge;
+        s.scene.mouseLocked = s.map.open;
+        if (s.flying && s.map.open && s.menu.Screen() == MenuScreen::None) s.map.Update(s.ap, s.aircraft);
         if (s.flying) s.scene.UpdateCamera(s.aircraft, s.cam, dt);
         else s.scene.MenuCamera(s.aircraft.pos, s.menuTime);
 
@@ -536,6 +606,7 @@ int main()
             float k = s.cam == CamMode::Cockpit ? 1.0f : 0.5f;
             float frost = (s.cam == CamMode::Cockpit && s.aircraft.Type().kind == AircraftKind::Prop) ? s.aircraft.ice : 0.0f;
             DrawVisionEffects(s.gGrey * k, s.gRed * k, frost);
+            s.map.Draw(s.aircraft, s.ap, WindAt(s, s.aircraft.pos), s.trail);
         }
 
         MenuAction act = s.menu.Update(s.cfg, s.run, s.aircraft, s.menuTime);
@@ -569,6 +640,7 @@ int main()
 
     s.cfg.Save();
     s.terrain.Unload();
+    s.map.Unload();
     s.fx.Unload();
     s.scene.Unload();
     s.audio.Shutdown();
