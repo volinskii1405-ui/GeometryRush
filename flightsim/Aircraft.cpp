@@ -10,27 +10,34 @@ using ui::L;
 namespace {
 
 constexpr float CL_ALPHA = 5.0f;   // 1/рад
-constexpr float NEG_STALL = -11.0f * DEG2RAD;
 
 float FlapFrac(const AircraftType& t, float flapsDeg) { return flapsDeg / t.flapDeg[3]; }
 float StallAlpha(const AircraftType& t, float ff) { return (t.stallDeg - t.stallFlapsLossDeg * ff) * DEG2RAD; }
 float Cl0(const AircraftType& t, float ff) { return t.cl0 + t.clFlaps * ff; }
+// Отрицательное сваливание. Перевёрнутым крылом (выпуклостью вниз) подъёмная сила слабее — |CLmin|
+// около 40 % от CLmax. Поэтому ниже скорости маневрирования Va штурвалом «от себя» не выйти
+// за предел прочности: крыло раньше сорвётся.
+float NegStall(const AircraftType& t, float ff)
+{
+    float clmaxClean = t.cl0 + CL_ALPHA * t.stallDeg * DEG2RAD;
+    return (-0.4f * clmaxClean - Cl0(t, ff)) / CL_ALPHA;
+}
 
 // Коэффициент подъёмной силы по углу атаки: линейный участок, срыв, «плоская пластина».
 // iceLoss — насколько лёд на крыле уменьшает критический угол атаки, рад.
 float LiftCoef(const AircraftType& t, float a, float ff, float* stallFactor, float iceLoss = 0.0f)
 {
-    const float as = StallAlpha(t, ff) - iceLoss, cl0 = Cl0(t, ff);
+    const float as = StallAlpha(t, ff) - iceLoss, cl0 = Cl0(t, ff), ns = NegStall(t, ff);
     const float plate = 1.05f * sinf(2.0f * a);
     *stallFactor = fmaxf(SmoothStep(as - 1.0f * DEG2RAD, as + 4.0f * DEG2RAD, a),
-                         SmoothStep(-NEG_STALL + 1.0f * DEG2RAD, -NEG_STALL + 5.0f * DEG2RAD, -a));
-    if (a >= NEG_STALL && a <= as) return cl0 + CL_ALPHA * a;
+                         SmoothStep(-ns + 1.0f * DEG2RAD, -ns + 5.0f * DEG2RAD, -a));
+    if (a >= ns && a <= as) return cl0 + CL_ALPHA * a;
     if (a > as) {
         float clmax = cl0 + CL_ALPHA * as;
         return Lerp(clmax, plate, SmoothStep(as, as + 9.0f * DEG2RAD, a));
     }
-    float clmin = cl0 + CL_ALPHA * NEG_STALL;
-    return Lerp(clmin, plate, SmoothStep(-NEG_STALL, -NEG_STALL + 9.0f * DEG2RAD, -a));
+    float clmin = cl0 + CL_ALPHA * ns;
+    return fmaxf(Lerp(clmin, plate, SmoothStep(-ns, -ns + 9.0f * DEG2RAD, -a)), clmin);
 }
 
 // Тяга по режиму 0..1 (без учёта реверса).
@@ -96,6 +103,9 @@ void Aircraft::Reset(Vector3 position, float headingDeg, float speedMs, bool gro
     touchdownFpm = 0;
     tailStrike = false;
     stallDrop_ = 0;
+    protI_ = 0;
+    protActive = false;
+    spin = spinDir = 0;
 }
 
 void Aircraft::Fail(Failure f)
@@ -138,6 +148,22 @@ float Aircraft::StallSpeedKt() const
     float ff = FlapFrac(t, flaps);
     float clmax = (Cl0(t, ff) + CL_ALPHA * (StallAlpha(t, ff) - IceStallLossDeg() * DEG2RAD)) * (1.0f - 0.1f * ice);
     return sqrtf(2.0f * Mass() * G / (1.225f * t.wingArea * clmax)) * MS_TO_KT;
+}
+
+bool Aircraft::NormalLaw() const
+{
+    if (!HasFlyByWire() || Broken()) return false;
+    for (int i = 0; i < type_->engineCount; ++i)
+        if (engines[i].Running() && fuel > 0.0f) return true;
+    return false;   // оба двигателя встали: только аварийная турбинка — альтернативный закон
+}
+
+float Aircraft::ManeuverSpeedKt() const
+{
+    const AircraftType& t = *type_;
+    float clmax = (t.cl0 + CL_ALPHA * t.stallDeg * DEG2RAD) * (1.0f - 0.1f * ice);
+    float vs = sqrtf(2.0f * Mass() * G / (1.225f * t.wingArea * clmax)) * MS_TO_KT;
+    return vs * sqrtf(LimitG());
 }
 
 float Aircraft::SpeedLimitKt() const
@@ -346,6 +372,7 @@ float Aircraft::EngineThrust(int i, float V, float rho, float dt, const Controls
 void Aircraft::Step(float dt, const Controls& c, const Terrain& terrain, Vector3 wind)
 {
     const AircraftType& t = *type_;
+    windNow = wind;
     UpdateDebris(dt, terrain);
     if (crashed) {
         // Обломки падают баллистически до земли и там остаются.
@@ -368,8 +395,42 @@ void Aircraft::Step(float dt, const Controls& c, const Terrain& terrain, Vector3
     const float trimRange = t.trimRangeDeg * DEG2RAD;
 
     // ------------------------------------------------ приводы органов управления
-    elevator = MoveTowards(elevator, Clampf(c.pitch, -1, 1) * t.maxElevDeg * DEG2RAD, 60.0f * DEG2RAD * dt);
-    aileron = MoveTowards(aileron, Clampf(c.roll, -1, 1) * t.maxAilDeg * DEG2RAD, 70.0f * DEG2RAD * dt);
+    // ------------------------------------------------ защиты электродистанционного управления
+    float pitchIn = Clampf(c.pitch, -1, 1), rollIn = Clampf(c.roll, -1, 1), elevCorr = 0;
+    protActive = false;
+    if (NormalLaw() && !onGround) {
+        const bool flapsOut = flaps > 1.0f;
+        const float nzMax = flapsOut ? 2.0f : 2.5f, nzMin = flapsOut ? 0.0f : -1.0f;
+        // Чем больше скорость, тем меньше отклоняется руль на тот же ход штурвала (как перегрузка на ход ручки).
+        const float va = ManeuverSpeedKt(), iasKt = fmaxf(ias * MS_TO_KT, 1.0f);
+        pitchIn *= Clampf(Sq(va / iasKt), 0.25f, 1.0f);
+        // Прогноз перегрузки на 0.35 с вперёд — ограничивать заранее, а не после превышения.
+        gRate_ = Lerp(gRate_, (gLoad - prevG_) / fmaxf(dt, 1e-4f), fminf(dt * 20.0f, 1.0f));
+        prevG_ = gLoad;
+        const float gPred = gLoad + 0.35f * gRate_;
+        const float eUp = gPred - (nzMax - 0.25f), eDn = (nzMin + 0.25f) - gPred;
+        if (eUp > 0.0f) protI_ -= eUp * 0.8f * dt;
+        else if (eDn > 0.0f) protI_ += eDn * 0.8f * dt;
+        else protI_ = MoveTowards(protI_, 0.0f, 0.08f * dt);
+        protI_ = Clampf(protI_, -0.35f, 0.35f);
+        elevCorr = protI_ - 0.3f * fmaxf(eUp, 0.0f) + 0.3f * fmaxf(eDn, 0.0f);
+        // Тангаж: не выше +30° и не ниже −15°.
+        const float pitchNow = PitchDeg();
+        if (pitchNow > 25.0f) elevCorr -= (pitchNow - 25.0f) * 0.012f;
+        if (pitchNow < -12.0f) elevCorr += (-12.0f - pitchNow) * 0.012f;
+        // Крен больше 67° не набрать: компьютер возвращает к 33°, если отпустить штурвал.
+        const float bankNow = BankDeg();
+        if (fabsf(bankNow) > 55.0f)
+            rollIn -= Sign(bankNow) * Clampf((fabsf(bankNow) - 55.0f) / 6.0f, 0.0f, 2.0f) + 0.6f * omega.x * Sign(bankNow) * Sign(bankNow);
+        else if (fabsf(bankNow) > 33.0f && fabsf(c.roll) < 0.05f) rollIn -= Sign(bankNow) * 0.15f;
+        rollIn = Clampf(rollIn, -1, 1);
+        protActive = fabsf(elevCorr) > 0.01f || fabsf(bankNow) > 60.0f;
+    } else {
+        protI_ = 0;
+    }
+    const float maxElev = t.maxElevDeg * DEG2RAD;
+    elevator = MoveTowards(elevator, Clampf(pitchIn * maxElev + elevCorr, -maxElev, maxElev), 60.0f * DEG2RAD * dt);
+    aileron = MoveTowards(aileron, rollIn * t.maxAilDeg * DEG2RAD, 70.0f * DEG2RAD * dt);
     rudder = MoveTowards(rudder, Clampf(c.yaw, -1, 1) * t.maxRudDeg * DEG2RAD, 50.0f * DEG2RAD * dt);
     if (!failures_[(int)Failure::FlapsJam]) flaps = MoveTowards(flaps, t.flapDeg[c.flapsLever], 2.5f * dt);
     speedbrake = MoveTowards(speedbrake, c.speedbrake ? 1.0f : 0.0f, dt / 1.5f);
@@ -460,6 +521,11 @@ void Aircraft::Step(float dt, const Controls& c, const Terrain& terrain, Vector3
     float cl = LiftCoef(t, alpha, ff, &stall, iceLoss);
     cl *= 1.0f - 0.1f * ice;
     cl += 4.0f * qh + 0.35f * elevEff;
+    {   // Крыло не даёт больше, чем на срыве (иначе перегрузка ниже Va превышала бы предел).
+        const float clmaxNow = Cl0(t, ff) + CL_ALPHA * (StallAlpha(t, ff) - iceLoss);
+        const float clminNow = Cl0(t, ff) + CL_ALPHA * NegStall(t, ff);
+        cl = Clampf(cl, clminNow * 1.03f, clmaxNow * 1.05f);
+    }
     cl *= 1.0f - 0.15f * speedbrake * (onGround ? 3.0f : 1.0f);   // на земле интерцепторы «гасят» подъёмную силу
     cl *= 1.0f + 0.08f * (1.0f - groundEffect);
 
@@ -482,7 +548,15 @@ void Aircraft::Step(float dt, const Controls& c, const Terrain& terrain, Vector3
     const float wings = 0.5f * (wl + wr);
     const bool tailGone = lost[(int)Part::Tail];
 
-    float clRoll = -0.09f * beta + wings * (t.clAileron * aileron - t.clp * (1.0f - 1.4f * stall) * ph) + 0.12f * rh
+    // Спиральная неустойчивость: в крене самолёт сам понемногу заваливается дальше и опускает нос
+    // (у «Сессны» — за полминуты-минуту). В облаках без горизонта пилот этого не замечает — спиральное пикирование.
+    const float bankRad = BankDeg() * DEG2RAD;
+    float spiral = 0.0f;
+    if (!NormalLaw() && !onGround && fabsf(bankRad) < 1.4f) {
+        float ks = t.kind == AircraftKind::Prop ? 0.0016f : 0.0009f;
+        spiral = ks * sinf(bankRad) * wings;
+    }
+    float clRoll = spiral - 0.09f * beta + wings * (t.clAileron * aileron - t.clp * (1.0f - 1.4f * stall) * ph) + 0.12f * rh
                  + 0.035f * stall * stallDrop_ * wings;
     float cm = tailGone
         // Без стабилизатора самолёт статически неустойчив и резко опускает нос.
@@ -693,13 +767,45 @@ void Aircraft::Step(float dt, const Controls& c, const Terrain& terrain, Vector3
 
     // Инерция меняется с массой топлива (пропорционально).
     const float massScale = mass / (t.emptyMass + t.payload + t.defaultFuel);
-    Vector3 T = Vector3Add(Tb, Rotate(Tw, inv));
+    // В развитом штопоре вращение определяет авторотация, а не обычные аэродинамические моменты.
+    Vector3 T = Vector3Add(Vector3Scale(Tb, 1.0f - 0.85f * spin), Rotate(Tw, inv));
     const Vector3 I{t.inertia[0] * massScale, t.inertia[1] * massScale, t.inertia[2] * massScale};
     Vector3 Iw{I.x * omega.x, I.y * omega.y, I.z * omega.z};
     Vector3 gyro = Vector3CrossProduct(omega, Iw);
     omega.x += (T.x - gyro.x) / I.x * dt;
     omega.y += (T.y - gyro.y) / I.y * dt;
     omega.z += (T.z - gyro.z) / I.z * dt;
+
+    // ------------------------------------------------ штопор («Сессна»)
+    // Срыв потока с рысканием: опускающееся крыло срывается сильнее, самолёт вращается вокруг
+    // вертикали, нос опущен на 50–60°, угол атаки ~40°, ~1 виток за 2.5 с, снижение 5000+ ft/мин.
+    // Вывод: РУД — малый газ, педаль против вращения, штурвал от себя; элероны — нейтрально.
+    if (t.kind == AircraftKind::Prop && !onGround) {
+        const float yawRate = -omega.y;                            // + — нос вправо
+        const float aoaDeg = alpha * RAD2DEG, stallDeg = stallAlpha * RAD2DEG;
+        if (spin <= 0.0f && stall > 0.5f && fabsf(yawRate) > 0.25f && Sign(c.yaw) == Sign(yawRate) && fabsf(c.yaw) > 0.5f)
+            spinDir = Sign(yawRate);
+        if (spinDir != 0.0f) {
+            const bool proRudder = c.yaw * spinDir > 0.3f, antiRudder = c.yaw * spinDir < -0.5f;
+            const bool aft = c.pitch > 0.3f, forward = c.pitch < -0.2f;
+            if (aoaDeg > stallDeg - 2.0f && !antiRudder && (proRudder || aft)) spin += dt / 2.5f;
+            else if (antiRudder && forward) spin -= dt / 1.2f;      // правильный вывод: ~1/2–1 виток
+            else if (antiRudder || forward) spin -= dt / 2.5f;
+            else spin -= dt / 4.0f;                                  // штурвал брошен — выходит сам, но медленно
+            if (aoaDeg < stallDeg - 4.0f) spin -= dt / 0.8f;        // поток восстановился
+            spin = Clampf(spin, 0.0f, 1.0f);
+            if (spin <= 0.0f) spinDir = 0.0f;
+        }
+        if (spin > 0.0f) {
+            const float rate = 2.5f * spin;                          // рад/с вокруг вертикали
+            Vector3 targetW{0, -spinDir * rate, 0};
+            Vector3 targetB = Rotate(targetW, QuaternionInvert(rot));
+            targetB.z += (40.0f - aoaDeg) * DEG2RAD * 1.2f * spin;   // нос «висит» на угле атаки ~40°
+            omega = Vector3Lerp(omega, targetB, fminf(spin * 6.0f * dt, 1.0f));
+        }
+    } else {
+        spin = spinDir = 0.0f;
+    }
 
     Quaternion w{omega.x, omega.y, omega.z, 0};
     Quaternion dq = QuaternionMultiply(rot, w);
@@ -715,7 +821,7 @@ void Aircraft::Step(float dt, const Controls& c, const Terrain& terrain, Vector3
     if (wheelsOnGround == 0 && !belly_) {
         peakG = fmaxf(peakG, gLoad);
         minG = fminf(minG, gLoad);
-        if (gLoad > LimitG() || gLoad < LimitNegG()) overstressed = true;
+        if (gLoad > LimitG() * 1.02f || gLoad < LimitNegG() * 1.02f) overstressed = true;
         if (gLoad > LimitG() * ultimateK_ || gLoad < LimitNegG() * ultimateK_) {
             // Ломается более нагруженное крыло: при крене с перегрузкой — поднимающееся.
             Part w = omega.x > 0.05f ? Part::WingL : omega.x < -0.05f ? Part::WingR : (GetRandomValue(0, 1) ? Part::WingL : Part::WingR);

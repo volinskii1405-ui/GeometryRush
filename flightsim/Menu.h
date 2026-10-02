@@ -1,13 +1,14 @@
 #pragma once
 #include "Config.h"
+#include "Logbook.h"
 #include "Missions.h"
 
 class Aircraft;
 
-enum class MenuScreen { None, Main, Missions, Free, Settings, Pause, Results, Crash };
+enum class MenuScreen { None, Main, Missions, Free, Settings, Pause, Results, Crash, Logbook };
 
 struct MenuAction {
-    enum Kind { None, StartMission, StartFree, Resume, Restart, ToMain, Quit, ToggleHelp, SettingsChanged } kind = None;
+    enum Kind { None, StartMission, StartFree, Resume, Restart, ToMain, Quit, ToggleHelp, SettingsChanged, Replay } kind = None;
     int index = 0;
 };
 
@@ -19,6 +20,7 @@ public:
     MenuAction Update(Config& cfg, const MissionRun& run, const Aircraft& a, float time);
 
     int selectedMission = 0;
+    const Logbook* logbook = nullptr;
 
 private:
     MenuAction MainScreen(Config& cfg);
@@ -28,6 +30,7 @@ private:
     MenuAction PauseScreen();
     MenuAction ResultsScreen(const Config& cfg, const MissionRun& run);
     MenuAction CrashScreen(const Aircraft& a);
+    MenuAction LogbookScreen();
 
     MenuScreen screen_ = MenuScreen::Main;
     MenuScreen settingsBack_ = MenuScreen::Main;

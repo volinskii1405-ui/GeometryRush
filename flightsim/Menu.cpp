@@ -3,6 +3,8 @@
 #include "UiText.h"
 #include "World.h"
 
+#include <cmath>
+#include <ctime>
 #include <string>
 #include <vector>
 
@@ -126,6 +128,7 @@ MenuAction Menu::Update(Config& cfg, const MissionRun& run, const Aircraft& a, f
     case MenuScreen::Pause: return PauseScreen();
     case MenuScreen::Results: return ResultsScreen(cfg, run);
     case MenuScreen::Crash: return CrashScreen(a);
+    case MenuScreen::Logbook: return LogbookScreen();
     default: return {};
     }
 }
@@ -136,17 +139,20 @@ MenuAction Menu::MainScreen(Config& cfg)
     DrawRectangleGradientH(0, 0, (int)(sw * 0.55f), (int)sh, Color{6, 10, 18, 230}, Color{6, 10, 18, 0});
     float x = 80 * S, y = sh * 0.16f;
     ui::Draw(L("FLIGHT SIM", "АВИАСИМУЛЯТОР"), x, y, 64 * S, WHITE, true);
-    ui::Draw(L("Island International · 3 aircraft · 14 missions", "Аэропорт «Остров» · 3 самолёта · 14 заданий"), x + 4 * S, y + 74 * S, 20 * S, kDim);
+    ui::Draw(TextFormat(L("Island International · 3 aircraft · %d missions", "Аэропорт «Остров» · 3 самолёта · %d заданий"), (int)MissionList().size()),
+             x + 4 * S, y + 74 * S, 20 * S, kDim);
 
-    const char* items[] = {L("Missions", "Задания"), L("Free flight", "Свободный полёт"), L("Settings", "Настройки"), L("Quit", "Выход")};
-    Nav(sel_, 4);
+    const char* items[] = {L("Missions", "Задания"), L("Free flight", "Свободный полёт"), L("Logbook", "Бортовой журнал"),
+                           L("Settings", "Настройки"), L("Quit", "Выход")};
+    Nav(sel_, 5);
     MenuAction act;
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 5; ++i) {
         Rectangle r{x, y + (140 + i * 62) * S, 360 * S, 50 * S};
         if (Button(r, items[i], sel_ == i, 24) || (sel_ == i && Enter())) {
             if (i == 0) Open(MenuScreen::Missions);
             else if (i == 1) Open(MenuScreen::Free);
-            else if (i == 2) Open(MenuScreen::Settings);
+            else if (i == 2) Open(MenuScreen::Logbook);
+            else if (i == 3) Open(MenuScreen::Settings);
             else act.kind = MenuAction::Quit;
         }
         if (CheckCollisionPointRec(GetMousePosition(), r)) sel_ = i;
@@ -156,7 +162,7 @@ MenuAction Menu::MainScreen(Config& cfg)
         total += 3;
         earned += cfg.Stars(m.id);
     }
-    ui::Draw(TextFormat(L("Stars collected: %d / %d", "Собрано звёзд: %d / %d"), earned, total), x, y + 400 * S, 20 * S, kGold);
+    ui::Draw(TextFormat(L("Stars collected: %d / %d", "Собрано звёзд: %d / %d"), earned, total), x, y + 462 * S, 20 * S, kGold);
     ui::Draw(L("Mouse or arrows + Enter.  F1 in flight — controls.", "Мышь или стрелки + Enter.  В полёте F1 — управление."), x, sh - 50 * S,
              16 * S, kDim);
     return act;
@@ -376,7 +382,10 @@ MenuAction Menu::ResultsScreen(const Config& cfg, const MissionRun& run)
     bool hasNext = run.Success() && mi >= 0 && mi + 1 < (int)MissionList().size();
     std::vector<const char*> items = {L("Retry (R)", "Ещё раз (R)")};
     if (hasNext) items.push_back(L("Next mission", "Следующее задание"));
+    items.push_back(L("Replay (F9)", "Повтор (F9)"));
     items.push_back(L("Missions", "К заданиям"));
+    const int replayIdx = hasNext ? 2 : 1;
+    if (IsKeyPressed(KEY_F9)) act.kind = MenuAction::Replay;
     int n = (int)items.size();
     if (IsKeyPressed(KEY_LEFT)) sel_ = (sel_ + n - 1) % n;
     if (IsKeyPressed(KEY_RIGHT)) sel_ = (sel_ + 1) % n;
@@ -391,6 +400,8 @@ MenuAction Menu::ResultsScreen(const Config& cfg, const MissionRun& run)
                 act.kind = MenuAction::StartMission;
                 act.index = mi + 1;
                 selectedMission = mi + 1;
+            } else if (i == replayIdx) {
+                act.kind = MenuAction::Replay;
             } else {
                 Open(MenuScreen::Missions);
                 act.kind = MenuAction::ToMain;
@@ -411,14 +422,107 @@ MenuAction Menu::CrashScreen(const Aircraft& a)
     ui::DrawCentered(L("CRASH", "АВАРИЯ"), sw * 0.5f, y + 18 * S, 40 * S, Color{255, 80, 70, 255}, true);
     Paragraph(a.crashReason.c_str(), x + 40 * S, y + 80 * S, w - 80 * S, 20 * S, kText);
     if (IsKeyPressed(KEY_R)) act.kind = MenuAction::Restart;
-    const char* items[] = {L("Retry (R)", "Ещё раз (R)"), L("Main menu (Esc)", "Главное меню (Esc)")};
+    const char* items[] = {L("Retry (R)", "Ещё раз (R)"), L("Replay (F9)", "Повтор (F9)"), L("Main menu (Esc)", "Главное меню (Esc)")};
     if (IsKeyPressed(KEY_ESCAPE)) act.kind = MenuAction::ToMain;
-    if (IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_RIGHT)) sel_ = 1 - sel_;
-    for (int i = 0; i < 2; ++i) {
-        Rectangle r{x + 40 * S + i * 350 * S, y + h - 70 * S, 330 * S, 48 * S};
+    if (IsKeyPressed(KEY_F9)) act.kind = MenuAction::Replay;
+    if (IsKeyPressed(KEY_LEFT)) sel_ = (sel_ + 2) % 3;
+    if (IsKeyPressed(KEY_RIGHT)) sel_ = (sel_ + 1) % 3;
+    for (int i = 0; i < 3; ++i) {
+        Rectangle r{x + 40 * S + i * 232 * S, y + h - 70 * S, 216 * S, 48 * S};
         if (CheckCollisionPointRec(GetMousePosition(), r)) sel_ = i;
-        if (Button(r, items[i], sel_ == i, 20) || (sel_ == i && IsKeyPressed(KEY_ENTER)))
-            act.kind = i == 0 ? MenuAction::Restart : MenuAction::ToMain;
+        if (Button(r, items[i], sel_ == i, 18) || (sel_ == i && IsKeyPressed(KEY_ENTER)))
+            act.kind = i == 0 ? MenuAction::Restart : i == 1 ? MenuAction::Replay : MenuAction::ToMain;
     }
+    return act;
+}
+
+MenuAction Menu::LogbookScreen()
+{
+    const float sw = (float)GetScreenWidth(), sh = (float)GetScreenHeight();
+    Dim();
+    MenuAction act;
+    if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_BACKSPACE) || IsKeyPressed(KEY_ENTER)) {
+        Open(MenuScreen::Main);
+        return act;
+    }
+    float w = fminf(1100 * S, sw - 60 * S), x = (sw - w) * 0.5f, y = 50 * S;
+    ui::Draw(L("Logbook", "Бортовой журнал"), x, y, 40 * S, WHITE, true);
+    y += 64 * S;
+    static const Logbook empty;
+    const Logbook& lb = logbook ? *logbook : empty;
+    auto hm = [](float hours) {
+        int m = (int)roundf(hours * 60.0f);
+        return std::string(TextFormat("%d:%02d", m / 60, m % 60));
+    };
+    // Итоги
+    struct Tile { const char* label; std::string value; };
+    std::vector<Tile> tiles = {
+        {L("Flight time", "Налёт"), hm(lb.TotalHours())},
+        {L("Flights", "Полётов"), TextFormat("%d", lb.Flights())},
+        {L("Landings", "Посадок"), TextFormat("%d", lb.Landings())},
+        {L("Crashes", "Аварий"), TextFormat("%d", lb.Crashes())},
+        {L("Best landing", "Лучшая посадка"), lb.BestFpm() > 0 ? TextFormat("%.0f fpm", lb.BestFpm()) : "—"},
+        {L("Average landing", "Средняя посадка"), lb.AverageFpm() > 0 ? TextFormat("%.0f fpm", lb.AverageFpm()) : "—"},
+    };
+    float tw = (w - 5 * 12 * S) / 6;
+    for (size_t i = 0; i < tiles.size(); ++i) {
+        float tx = x + i * (tw + 12 * S);
+        DrawRectangle((int)tx, (int)y, (int)tw, (int)(70 * S), Color{24, 30, 42, 230});
+        ui::Draw(tiles[i].label, tx + 10 * S, y + 8 * S, 14 * S, kDim);
+        ui::Draw(tiles[i].value.c_str(), tx + 10 * S, y + 30 * S, 28 * S, WHITE, true);
+    }
+    y += 86 * S;
+    std::string per;
+    for (int k = 0; k < (int)AircraftKind::Count; ++k) {
+        const AircraftType& t = GetAircraftType((AircraftKind)k);
+        per += TextFormat("%s%s — %s", k ? "     " : "", L(t.nameEn, t.nameRu), hm(lb.TotalHours(k)).c_str());
+    }
+    ui::Draw(per.c_str(), x, y, 16 * S, kDim);
+    y += 36 * S;
+
+    // Последние полёты
+    const float cols[] = {0, 150, 400, 700, 790, 880, 990};
+    const char* heads[] = {L("Date", "Дата"), L("Aircraft", "Самолёт"), L("Route", "Маршрут"), L("Time", "Время"),
+                           L("Landings", "Посадок"), L("Best", "Лучшая"), L("Result", "Итог")};
+    for (int c = 0; c < 7; ++c) ui::Draw(heads[c], x + cols[c] * S * w / (1100 * S), y, 15 * S, kGold);
+    y += 26 * S;
+    const auto& es = lb.Entries();
+    if (es.empty()) ui::Draw(L("No flights yet - fly something!", "Полётов пока нет — летим!"), x, y + 10 * S, 20 * S, kDim);
+    int shown = 0;
+    for (int i = (int)es.size() - 1; i >= 0 && y < sh - 110 * S; --i, ++shown) {
+        const LogEntry& e = es[i];
+        time_t tt = (time_t)e.when;
+        struct tm* lt = localtime(&tt);
+        char date[32] = "";
+        if (lt) strftime(date, sizeof date, "%d.%m %H:%M", lt);
+        auto apName = [](int a) -> std::string {
+            if (a == -2) return L("off-field", "вне аэродрома");
+            if (a == -3) return L("airborne", "в воздухе");
+            if (a < 0) return "—";
+            return world::GetAirport(a).main ? L("Island", "Остров") : L("Pass", "Перевал");
+        };
+        std::string route = apName(e.fromAirport) + " → " + apName(e.toAirport);
+        if (e.mission >= 0 && e.mission < (int)MissionList().size()) route = L(MissionList()[e.mission].titleEn, MissionList()[e.mission].titleRu);
+        const AircraftType& t = GetAircraftType((AircraftKind)(e.aircraft % (int)AircraftKind::Count));
+        std::string vals[7] = {date, L(t.nameEn, t.nameRu), route, hm(e.durationS / 3600.0f), TextFormat("%d", e.landings),
+                               e.landings ? TextFormat("%.0f fpm", e.bestFpm) : "—",
+                               e.result == 1 ? L("crash", "авария") : L("ok", "норма")};
+        if (shown % 2 == 0) DrawRectangle((int)(x - 6 * S), (int)(y - 3 * S), (int)(w + 12 * S), (int)(26 * S), Color{255, 255, 255, 10});
+        for (int c = 0; c < 7; ++c) {
+            Color col = c == 6 && e.result == 1 ? Color{255, 100, 90, 255} : kText;
+            std::string v = vals[c];
+            float maxW = ((c < 6 ? cols[c + 1] : 1100.0f) - cols[c] - 10) * w / 1100.0f;
+            while (v.size() > 3 && ui::Measure(v.c_str(), 15 * S) > maxW) {   // обрезать по ширине колонки (символ UTF-8 целиком)
+                unsigned char ch;
+                do {
+                    ch = (unsigned char)v.back();
+                    v.pop_back();
+                } while (!v.empty() && (ch & 0xC0) == 0x80);
+            }
+            ui::Draw(v.c_str(), x + cols[c] * S * w / (1100 * S), y, 15 * S, col);
+        }
+        y += 26 * S;
+    }
+    if (Button({x, sh - 80 * S, 220 * S, 50 * S}, L("Back (Esc)", "Назад (Esc)"), true)) Open(MenuScreen::Main);
     return act;
 }

@@ -31,6 +31,9 @@ public:
     float crashAge = -1;
     bool mouseLocked = false;   // мышь занята (открыта карта): камера её не слушает   // секунд после катастрофы (для огня и дыма)
 
+    // Другой самолёт (трафик): внутри BeginMode3D.
+    void DrawTraffic(const Aircraft& a, float time) { DrawAircraftModel(a, time); }
+
 private:
     void DrawSky();
     void DrawAirport(int index, float time, Vector3 wind);

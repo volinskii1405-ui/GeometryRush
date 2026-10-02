@@ -6,7 +6,7 @@ struct Controls;
 
 // Сигнализация: GPWS/TAWS (земля), превышение скорости, крен, сваливание, отказы систем.
 enum class Alert { PullUp, Terrain, SinkRate, TooLowGear, BankAngle, Overspeed, Stall,
-                   EngFire, Structure, EngFail, GearUnsafe, FlapsJam, FuelLow, Overstress, Ice, BrakesHot, Count };
+                   Windshear, EngFire, Structure, EngFail, GearUnsafe, FlapsJam, FuelLow, Overstress, Ice, BrakesHot, Count };
 
 class WarningSystem {
 public:
@@ -23,11 +23,14 @@ public:
 
     float radioAltFt = 0;      // радиовысота
     float timeToImpact = -1;   // прогноз столкновения с рельефом, с (-1 — нет)
+    float shearF = 0;          // «F-фактор» сдвига ветра: потеря энергии из-за ветра (> 0.1 — опасно)
 
 private:
     static constexpr int N = (int)Alert::Count;
     bool active_[N] = {};
     float hold_[N] = {};
+    float prevHeadwind_ = 0;
+    bool havePrevWind_ = false;
 };
 
 // Голосовой отсчёт радиовысоты на посадке: 1000, 500, «Minimums» (200), 100, 50, 40, 30, 20, 10, «Retard»;

@@ -62,6 +62,8 @@ public:
                float pitchDeg = 0.0f, float gammaDeg = 0.0f, float fuelKg = -1.0f);
     void Step(float dt, const Controls& c, const Terrain& terrain, Vector3 wind);
     void Fail(Failure f);
+    // Внешняя причина катастрофы (например, столкновение с другим самолётом на полосе).
+    void ForceCrash(const std::string& reason) { Crash(reason); }
     bool Failed(Failure f) const { return failures_[(int)f]; }
 
     // ---- состояние
@@ -93,6 +95,7 @@ public:
     float oat = 15;              // температура наружного воздуха, °C
     bool inCloud = false, inRain = false;
     bool lastAntiIce = false;    // положение выключателя на последнем шаге (для сигнализации)
+    Vector3 windNow{};           // ветер на последнем шаге (для обнаружения сдвига ветра)
     float qnh = 1013.25f;        // давление на уровне моря, гПа
     float isaDev = 0;            // отклонение температуры от стандартной атмосферы, °C
     // Плотность воздуха: давление по QNH, температура — со сдвигом от стандартной.
@@ -147,6 +150,17 @@ public:
 
     float StallSpeedKt() const;   // скорость сваливания (приборная) при текущих массе и закрылках
     float SpeedLimitKt() const;   // текущее ограничение: VMO / VFE / VLE
+    // Скорость маневрирования Va: ниже неё полное резкое отклонение руля высоты не сломает самолёт —
+    // крыло раньше сорвётся. Меньше у лёгкого самолёта (Vs·√n, Vs растёт с массой).
+    float ManeuverSpeedKt() const;
+    // Лайнер с электродистанционным управлением (как Airbus): в «нормальном законе» компьютер не даёт
+    // выйти за −1…+2.5 G (с закрылками 0…+2 G) и за крен 67°. При разрушении конструкции или отказе
+    // обоих двигателей — «альтернативный закон», защиты нет.
+    bool HasFlyByWire() const { return type_->kind == AircraftKind::Airliner; }
+    bool NormalLaw() const;
+    bool protActive = false;     // защита сейчас ограничивает штурвал
+    float spin = 0;              // развитость штопора 0..1
+    float spinDir = 0;           // +1 — правый, −1 — левый
 
 private:
     void Crash(const std::string& reason, bool fire = true);
@@ -159,5 +173,7 @@ private:
     float stallDrop_ = 0;
     float ultimateK_ = 1.5f;   // разрушающая / эксплуатационная (немного разная от полёта к полёту)
     bool belly_ = false;       // скольжение на брюхе/крыле
-    float plugHeat_[2] = {0, 0};   // сколько секунд колесо выше температуры плавления пробок   // в какую сторону сваливается крыло при срыве
+    float plugHeat_[2] = {0, 0};
+    float protI_ = 0;          // интегратор защиты перегрузки, рад руля высоты
+    float prevG_ = 1, gRate_ = 0;   // сколько секунд колесо выше температуры плавления пробок   // в какую сторону сваливается крыло при срыве
 };

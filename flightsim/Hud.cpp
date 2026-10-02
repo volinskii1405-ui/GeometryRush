@@ -182,6 +182,14 @@ void DrawSpeedTape(const Aircraft& a, float x, float cy, float wdt, float hgt, f
             TextR(buf, x + wdt - 24 * S, y - 7 * S, 14, WHITE);
         }
     }
+    {   // Va — скорость маневрирования: выше неё резко рулить нельзя
+        float va = a.ManeuverSpeedKt();
+        float vy = Y(va);
+        if (vy > top && vy < top + hgt && va < a.SpeedLimitKt()) {
+            DrawLineEx({x + 26 * S, vy}, {x + wdt - 9 * S, vy}, 2.0f * S, kAmber);
+            Text("VA", x + 3 * S, vy - 7 * S, 12, kAmber);
+        }
+    }
     if (g_ap) {   // заданная скорость
         float ty = Clampf(Y(g_ap->spdTarget), top + 4 * S, top + hgt - 4 * S);
         DrawTriangle({x + wdt - 1 * S, ty}, {x + wdt + 7 * S, ty + 6 * S}, {x + wdt + 7 * S, ty - 6 * S}, kCyan);
@@ -516,6 +524,8 @@ void DrawEcam(const Aircraft& a, float x, float y, float w)
                         L("Aircraft uncontrollable", "Самолёт неуправляем"), kRed});
     if (a.lost[(int)Part::Tail])
         msgs.push_back({"STABILIZER LOST", L("No pitch control", "Нет управления по тангажу"), kRed});
+    if (a.HasFlyByWire() && !a.NormalLaw() && !a.crashed)
+        msgs.push_back({"ALTN LAW", L("Protections lost: G, bank and pitch not limited", "Защиты потеряны: перегрузка, крен и тангаж не ограничены"), kAmber});
     if (a.overstressed && !a.Broken())
         msgs.push_back({"OVERSTRESS", TextFormat(L("%.1f G (limit %.1f / %.1f G): structure damaged, land", "%.1f G (предел %.1f / %.1f G): конструкция повреждена, садитесь"),
                                                  a.peakG > -a.minG * a.LimitG() / -a.LimitNegG() ? a.peakG : a.minG, a.LimitG(), a.LimitNegG()),
@@ -659,7 +669,7 @@ void DrawAlerts(const WarningSystem& w, float time)
     TextC("MASTER CAUTION", bx + 260 * S, by + 10 * S, 12, caut ? BLACK : Color{120, 100, 50, 255});
 
     // Активные сигналы по приоритету
-    const Alert order[] = {Alert::Structure, Alert::PullUp, Alert::EngFire, Alert::Overspeed, Alert::Stall, Alert::Terrain, Alert::SinkRate,
+    const Alert order[] = {Alert::Windshear, Alert::Structure, Alert::PullUp, Alert::EngFire, Alert::Overspeed, Alert::Stall, Alert::Terrain, Alert::SinkRate,
                            Alert::TooLowGear, Alert::BankAngle, Alert::EngFail, Alert::GearUnsafe, Alert::FuelLow, Alert::FlapsJam,
                            Alert::Overstress, Alert::Ice, Alert::BrakesHot};
     float y = 92 * S;
@@ -761,6 +771,7 @@ std::vector<std::string> HelpLines(const Aircraft& a)
         L("Speed brake: / or K   Fire handle: J   Camera: C (mouse to look)", "Интерцепторы: / или K   Пожарный кран: J   Камера: C (мышь — обзор)"),
         L("Anti-ice: I (in cloud below +2 C)   Watch brake temperature: BRK", "Обогрев от обледенения: I (в облаке ниже +2 °C)   Температура тормозов: BRK"),
         L("Map and route: N   NAV (fly the route): F2   Altimeter: F5/F6, F7 STD/QNH", "Карта и маршрут: N   NAV (по маршруту): F2   Высотомер: F5/F6, F7 STD/QNH"),
+        L("Replay of the last 40 s: F9", "Повтор последних 40 с: F9"),
         L("Autopilot: T - AP, Y - auto throttle, L - ILS, U - V/S, O - FD", "Автопилот: T — AP, Y — автомат тяги, L — ILS, U — V/S, O — директор"),
         L("Targets: 9/0 heading, -/= altitude, ,/. speed, ;/' vertical speed", "Задатчики: 9/0 курс, -/= высота, ,/. скорость, ;/' вертикальная"),
         L("Wind: F8   Pause/menu: Esc   Restart: R", "Ветер: F8   Пауза/меню: Esc   Заново: R"),

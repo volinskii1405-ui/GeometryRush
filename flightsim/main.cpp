@@ -3,14 +3,17 @@
 // автопилот, GPWS и другие предупреждения, погода и время суток, задания со звёздами.
 
 #include "Aircraft.h"
+#include "Atc.h"
 #include "Audio.h"
 #include "Autopilot.h"
 #include "Config.h"
 #include "Effects.h"
 #include "Hud.h"
+#include "Logbook.h"
 #include "Map.h"
 #include "Menu.h"
 #include "Missions.h"
+#include "Replay.h"
 #include "Scene.h"
 #include "Terrain.h"
 #include "UiText.h"
@@ -18,6 +21,8 @@
 #include "World.h"
 
 #include "rlgl.h"
+
+#include <ctime>
 
 using namespace fs;
 using ui::L;
@@ -54,6 +59,22 @@ struct Sim {
     Menu menu;
     MissionRun run;
     NavMap map;
+    Atc atc;
+    // бортовой журнал
+    Logbook log;
+    LogEntry cur;
+    bool logActive = false, tdPending = false;
+    float tdFpmAbs = 0;
+    // повтор
+    ReplayRecorder rec;
+    struct Replay {
+        bool on = false, paused = false, userCam = false;
+        float head = 0, prevHead = 0, camTimer = 0;
+        int camIdx = 0;
+        CamMode cam = CamMode::Chase;
+        MenuScreen returnTo = MenuScreen::None;
+        Aircraft view;
+    } replay;
     std::vector<Vector2> trail;   // пройденный путь для карты
     float trailTimer = 0;
     FlightSetup setup;
@@ -63,6 +84,8 @@ struct Sim {
     bool help = false;
     bool mouseYoke = false;
     float gGrey = 0, gRed = 0;   // перегрузка глазами пилота
+    // Микропорыв: нисходящий поток из грозового облака, растекающийся у земли во все стороны.
+    struct Microburst { bool active = false; Vector3 c{}; float R = 900, U = 18, W = 13; } burst;
     bool gamepad = false;
     CamMode cam = CamMode::Chase;
     int wind = 0;
@@ -105,11 +128,27 @@ float ThermalLift(const Sim& s, Vector3 pos)
     return lift * k * SmoothStep(20.0f, 250.0f, agl) * (1.0f - SmoothStep(top * 0.75f, top, agl));
 }
 
+// Ветер микропорыва: на входе — усиление встречного ветра (растекание навстречу), в центре — мощный
+// нисходящий поток, на выходе — попутный. Самое опасное — на высоте 200–1000 ft на заходе.
+Vector3 BurstWind(const Sim& s, Vector3 pos)
+{
+    const Sim::Microburst& b = s.burst;
+    if (!b.active) return {};
+    float dx = pos.x - b.c.x, dz = pos.z - b.c.z, r = sqrtf(dx * dx + dz * dz);
+    if (r > 4.0f * b.R) return {};
+    float agl = pos.y - s.terrain.SurfaceHeight(pos.x, pos.z);
+    float ur = b.U * (r < b.R ? r / b.R : expf(-(r - b.R) / (0.9f * b.R))) * (1.0f - SmoothStep(250.0f, 900.0f, agl));
+    float w = -b.W * expf(-1.5f * (r / b.R) * (r / b.R)) * SmoothStep(20.0f, 250.0f, agl) * (1.0f - SmoothStep(1200.0f, 2000.0f, agl));
+    float k = r > 1.0f ? 1.0f / r : 0.0f;
+    return {dx * k * ur, w, dz * k * ur};
+}
+
 Vector3 WindAt(const Sim& s, Vector3 pos)
 {
     float lift = ThermalLift(s, pos);
     // В термике слегка болтает.
     Vector3 thermal{0.25f * lift * sinf(s.time * 2.3f + pos.x * 0.01f), lift, 0.25f * lift * sinf(s.time * 1.9f + pos.z * 0.01f)};
+    thermal = Vector3Add(thermal, BurstWind(s, pos));
     const WindPreset& w = kWinds[s.wind];
     if (w.speedKt <= 0.0f) return thermal;
     float agl = pos.y - s.terrain.SurfaceHeight(pos.x, pos.z);
@@ -171,8 +210,16 @@ void SyncEnvironment(Sim& s)
     a.isaDev = s.env.IsaDev();
 }
 
+// Закрыть запись бортового журнала (короткие «полёты» без посадок не записываем).
+void CloseLog(Sim& s)
+{
+    if (s.logActive && (s.cur.durationS > 15.0f || s.cur.landings > 0)) s.log.Add(s.cur);
+    s.logActive = false;
+}
+
 void StartFlight(Sim& s, const FlightSetup& setup)
 {
+    CloseLog(s);
     const bool restart = &setup == &s.setup;   // R — тот же полёт заново: маршрут сохраняется
     s.setup = setup;
     s.aircraft.SetType(setup.aircraft);
@@ -242,13 +289,37 @@ void StartFlight(Sim& s, const FlightSetup& setup)
         Aircraft::Trim tr = Aircraft::ComputeTrim(t, mass, v, yM, 0, !t.retractableGear, 0, rhoScale(yM));
         c.throttle = tr.throttle;
         c.trim = tr.trim;
-        s.aircraft.Reset({p.x, yM, p.z}, hdg, v, false, c, tr.alphaDeg, 0, fuel);
+        s.aircraft.Reset({p.x, yM, p.z}, hdg, v, false, c, tr.alphaDeg + setup.airPitchDeg, setup.airPitchDeg, fuel);
+        if (setup.airBankDeg != 0.0f) {   // крен при старте (спираль)
+            Quaternion bank = QuaternionFromAxisAngle({1, 0, 0}, setup.airBankDeg * DEG2RAD);
+            s.aircraft.rot = QuaternionNormalize(QuaternionMultiply(s.aircraft.rot, bank));
+        }
         // Заданная высота — по показаниям высотомера (установлено 1013, а не давление района).
         s.ap.Reset(hdg, roundf((yM * M_TO_FT + (c.baro - s.env.qnh) * 27.3f) / 100.0f) * 100.0f, setup.airSpeedKt, false, false);
         break;
     }
     }
     if (!restart) s.ap.ClearRoute();
+    // Микропорыв на глиссаде: в задании «Сдвиг ветра» и иногда — при случайных отказах в свободном полёте.
+    s.burst = {};
+    if (setup.microburst || (setup.fail == FailPlan::Random && GetRandomValue(0, 99) < 35)) {
+        const Airport& port = world::GetAirport(setup.airport);
+        int end = setup.start == StartKind::Air ? 0 : setup.end;
+        float dist = port.main ? 3600.0f : 2200.0f;
+        s.burst.active = true;
+        s.burst.c = Vector3Subtract(port.rwy.Threshold(end), Vector3Scale(port.rwy.Dir(end), dist));
+        s.burst.R = port.main ? 900.0f : 600.0f;
+    }
+    s.atc.Start(setup, s.env, s.burst.active);
+    s.rec.Clear();
+    s.replay.on = false;
+    s.cur = LogEntry{};
+    s.cur.when = (long long)time(nullptr);
+    s.cur.aircraft = (int)setup.aircraft;
+    s.cur.fromAirport = setup.start == StartKind::Runway ? setup.airport : -3;   // −3 — начали в воздухе
+    s.cur.mission = setup.mission;
+    s.logActive = true;
+    s.tdPending = false;
     s.trail.clear();
     s.trailTimer = 0;
     s.ctl = c;
@@ -277,6 +348,7 @@ void ShowMenu(Sim& s, MenuScreen screen)
     FlightSetup bg;
     bg.aircraft = (AircraftKind)(s.cfg.freeAircraft % (int)AircraftKind::Count);
     StartFlight(s, bg);
+    s.logActive = false;   // фон меню — не полёт
     s.flying = false;
     s.menu.Open(screen);
     s.menuTime = 0;
@@ -299,6 +371,106 @@ float KeyStick(float current, float input, float dt)
     return MoveTowards(current, 0.0f, 2.2f * dt);
 }
 
+// ---------------------------------------------------------------- повтор
+
+const CamMode kReplayCams[] = {CamMode::Chase, CamMode::Tower, CamMode::Orbit, CamMode::Cockpit};
+
+void StartReplay(Sim& s, MenuScreen returnTo)
+{
+    if (s.rec.Empty()) return;
+    Sim::Replay& r = s.replay;
+    r.on = true;
+    r.paused = false;
+    r.userCam = false;
+    r.returnTo = returnTo;
+    r.head = r.prevHead = s.rec.Start();
+    r.camIdx = 0;
+    r.camTimer = 0;
+    r.cam = kReplayCams[0];
+    r.view = s.aircraft;   // тот же тип и состояние; положение задаёт запись
+    float ca;
+    bool td;
+    s.rec.Apply(r.view, r.head, r.head, &ca, &td);
+    s.scene.ResetCamera(r.view);
+    s.map.open = false;
+    s.audio.StopAll();
+    s.menu.Open(MenuScreen::None);
+}
+
+void StopReplay(Sim& s)
+{
+    s.replay.on = false;
+    s.scene.ResetCamera(s.aircraft);
+    if (s.replay.returnTo != MenuScreen::None) s.menu.Open(s.replay.returnTo);
+}
+
+void UpdateReplay(Sim& s, float dt)
+{
+    Sim::Replay& r = s.replay;
+    if (IsKeyPressed(KEY_F9) || IsKeyPressed(KEY_ESCAPE)) {
+        StopReplay(s);
+        return;
+    }
+    if (IsKeyPressed(KEY_SPACE)) r.paused = !r.paused;
+    if (IsKeyPressed(KEY_LEFT)) r.head = fmaxf(r.head - 5.0f, s.rec.Start());
+    if (IsKeyPressed(KEY_RIGHT)) r.head = fminf(r.head + 5.0f, s.rec.End());
+    if (IsKeyPressed(KEY_C)) {
+        r.userCam = true;
+        r.camIdx = (r.camIdx + 1) % 4;
+        r.cam = kReplayCams[r.camIdx];
+    }
+    r.prevHead = r.head;
+    if (!r.paused) r.head += dt;
+    if (r.head > s.rec.End() + 1.5f) {   // по кругу
+        r.head = r.prevHead = s.rec.Start();
+        s.scene.ResetCamera(r.view);
+    }
+    // Камеры сменяются сами каждые 6 с, пока пользователь не выбрал свою (C).
+    if (!r.userCam && !r.paused) {
+        r.camTimer += dt;
+        if (r.camTimer > 6.0f) {
+            r.camTimer = 0;
+            r.camIdx = (r.camIdx + 1) % 4;
+            r.cam = kReplayCams[r.camIdx];
+        }
+    }
+    float crashAge = -1;
+    bool td = false;
+    s.rec.Apply(r.view, fminf(r.head, s.rec.End()), r.prevHead, &crashAge, &td);
+    s.scene.crashAge = crashAge >= 0 ? crashAge + fmaxf(r.head - s.rec.End(), 0.0f) : -1.0f;
+    s.fx.Update(r.view, s.env, WindAt(s, r.view.pos), r.paused ? 0.0f : dt, td);
+}
+
+void DrawReplayOverlay(const Sim& s)
+{
+    const Sim::Replay& r = s.replay;
+    const float sw = (float)GetScreenWidth(), sh = (float)GetScreenHeight();
+    const float S = fmaxf(fminf(sh / 900.0f, sw / 1500.0f), 0.5f);
+    // «Кино»: тёмные полосы сверху и снизу.
+    DrawRectangle(0, 0, (int)sw, (int)(54 * S), Color{0, 0, 0, 200});
+    DrawRectangle(0, (int)(sh - 96 * S), (int)sw, (int)(96 * S), Color{0, 0, 0, 200});
+    if (fmodf((float)GetTime(), 1.0f) < 0.6f) DrawCircle((int)(30 * S), (int)(27 * S), 8 * S, Color{230, 40, 40, 255});
+    ui::Draw(L("REPLAY", "ПОВТОР"), 46 * S, 13 * S, 26 * S, WHITE, true);
+    const ReplayFrame* f = s.rec.FrameAt(r.head);
+    if (f) {
+        std::string data = TextFormat("%.0f kt   %.0f ft   %.1f G", f->ias * MS_TO_KT, f->alt * M_TO_FT, f->gLoad);
+        if (f->onGround && f->touchdownFpm < -1.0f) data += TextFormat(L("   touchdown %.0f fpm", "   касание %.0f fpm"), f->touchdownFpm);
+        ui::DrawRight(data.c_str(), sw - 30 * S, 15 * S, 22 * S, WHITE);
+    }
+    // Полоса прокрутки
+    float x0 = 30 * S, x1 = sw - 30 * S, y = sh - 80 * S;
+    float len = fmaxf(s.rec.End() - s.rec.Start(), 0.1f);
+    float k = Clampf((r.head - s.rec.Start()) / len, 0.0f, 1.0f);
+    DrawRectangle((int)x0, (int)y, (int)(x1 - x0), (int)(6 * S), Color{80, 80, 90, 255});
+    DrawRectangle((int)x0, (int)y, (int)((x1 - x0) * k), (int)(6 * S), Color{230, 60, 60, 255});
+    DrawCircle((int)(x0 + (x1 - x0) * k), (int)(y + 3 * S), 8 * S, WHITE);
+    ui::Draw(TextFormat("%s %.1f / %.0f %s   ·   %s: %s%s", r.paused ? "||" : ">", r.head - s.rec.Start(), len, L("s", "с"), L("camera", "камера"),
+                        CamModeName(r.cam), r.userCam ? "" : L(" (auto)", " (авто)")),
+             x0, y + 18 * S, 18 * S, WHITE);
+    ui::DrawRight(L("Space - pause   <- -> - 5 s   C - camera   F9 / Esc - exit", "Space — пауза   ← → — 5 с   C — камера   F9 / Esc — выход"), x1,
+                  y + 20 * S, 16 * S, Color{170, 176, 186, 255});
+}
+
 void HandleFlightInput(Sim& s, float dt)
 {
     Controls& c = s.ctl;
@@ -306,6 +478,10 @@ void HandleFlightInput(Sim& s, float dt)
     auto down = [](int k) { return IsKeyDown(k) ? 1.0f : 0.0f; };
 
     if (IsKeyPressed(KEY_F1)) s.help = !s.help;
+    if (IsKeyPressed(KEY_F9)) {
+        StartReplay(s, MenuScreen::None);
+        return;
+    }
     if (IsKeyPressed(KEY_R)) {
         StartFlight(s, s.setup);
         return;
@@ -488,6 +664,28 @@ void UpdateFlight(Sim& s, float dt)
     s.warnings.Update(s.aircraft, s.terrain, dt);
     s.callouts.Update(s.aircraft, s.warnings.radioAltFt, s.ctl, dt);
     s.fx.Update(s.aircraft, s.env, WindAt(s, s.aircraft.pos), dt, touchdown);
+    if (s.atc.Update(s.aircraft, s.ap, s.env, s.warnings.radioAltFt, WindName(s.wind), dt)) s.audio.PlayRadio();
+    s.run.throttle = s.ctl.throttle;
+    s.rec.Record(s.aircraft, s.time, s.crashAge, touchdown);
+    // Бортовой журнал: посадка засчитывается, когда самолёт после касания покатился медленно и цел.
+    if (s.logActive) {
+        Aircraft& a = s.aircraft;
+        s.cur.durationS = s.time;
+        if (touchdown) {
+            s.tdPending = true;
+            s.tdFpmAbs = fabsf(a.touchdownFpm);
+        }
+        float gsMs = sqrtf(a.vel.x * a.vel.x + a.vel.z * a.vel.z);
+        if (s.tdPending && !a.crashed && a.onGround && gsMs < 15.0f) {
+            s.tdPending = false;
+            s.cur.bestFpm = s.cur.landings == 0 ? s.tdFpmAbs : fminf(s.cur.bestFpm, s.tdFpmAbs);
+            s.cur.sumFpm += s.tdFpmAbs;
+            ++s.cur.landings;
+            int ap = world::NearestAirport(a.pos.x, a.pos.z);
+            s.cur.toAirport = world::GetAirport(ap).rwy.Contains(a.pos.x, a.pos.z, 20.0f) ? ap : -2;
+        }
+        if (a.crashed) s.cur.result = 1;
+    }
     s.run.Update(s.aircraft, s.warnings, s.terrain, dt);
 
     // Итоги задания — через пару секунд после завершения.
@@ -536,6 +734,8 @@ int main()
     s.terrain.BuildMeshes(s.scene.LitShader());
     s.scene.BuildWorld(s.terrain);
     s.map.Build(s.terrain);
+    s.log.Load();
+    s.menu.logbook = &s.log;
     ShowMenu(s, MenuScreen::Main);
 
     while (!WindowShouldClose() && !s.quit) {
@@ -543,7 +743,9 @@ int main()
         s.menuTime += dt;
 
         bool menuOpen = s.menu.Screen() != MenuScreen::None;
-        if (s.flying && !menuOpen) {
+        if (s.replay.on) {
+            UpdateReplay(s, dt);
+        } else if (s.flying && !menuOpen) {
             if (IsKeyPressed(KEY_ESCAPE)) {
                 if (s.map.open) s.map.open = false;
                 else if (s.help) s.help = false;
@@ -555,31 +757,37 @@ int main()
                 HandleFlightInput(s, dt);
             }
         }
-        if (s.flying && !s.paused && s.menu.Screen() == MenuScreen::None) UpdateFlight(s, dt);
+        if (s.flying && !s.paused && !s.replay.on && s.menu.Screen() == MenuScreen::None) UpdateFlight(s, dt);
         else if (s.flying && s.menu.Screen() == MenuScreen::Results) s.fx.Update(s.aircraft, s.env, {}, dt, false);
 
-        bool sounding = s.flying && !s.paused && s.menu.Screen() != MenuScreen::Results;
+        bool sounding = s.flying && !s.paused && !s.replay.on && s.menu.Screen() != MenuScreen::Results;
         if (s.ap.apOffSound) {
             s.ap.apOffSound = false;
             if (sounding) s.audio.PlayApDisconnect();
         }
         s.audio.Update(s.aircraft, s.ctl, s.warnings, s.callouts, !sounding);
-        s.scene.crashAge = s.crashAge;
+        if (!s.replay.on) s.scene.crashAge = s.crashAge;
         s.scene.mouseLocked = s.map.open;
         if (s.flying && s.map.open && s.menu.Screen() == MenuScreen::None) s.map.Update(s.ap, s.aircraft);
-        if (s.flying) s.scene.UpdateCamera(s.aircraft, s.cam, dt);
+        if (s.replay.on) s.scene.UpdateCamera(s.replay.view, s.replay.cam, dt);
+        else if (s.flying) s.scene.UpdateCamera(s.aircraft, s.cam, dt);
         else s.scene.MenuCamera(s.aircraft.pos, s.menuTime);
+        const Aircraft& shown = s.replay.on ? s.replay.view : s.aircraft;
 
         BeginDrawing();
         ClearBackground(s.env.horizon);
-        s.scene.Draw(s.aircraft, s.terrain, s.flying ? s.cam : CamMode::Orbit, s.time + s.menuTime, WindAt(s, s.aircraft.pos), s.fx);
-        if (s.flying && s.run.Setup().goal == GoalKind::Gates) {
+        s.scene.Draw(shown, s.terrain, s.replay.on ? s.replay.cam : (s.flying ? s.cam : CamMode::Orbit), s.time + s.menuTime,
+                     WindAt(s, shown.pos), s.fx);
+        if (s.flying && (s.run.Setup().goal == GoalKind::Gates || (s.atc.TrafficVisible() && !s.replay.on))) {
             BeginMode3D(s.scene.camera);
-            s.run.DrawGates();
+            if (s.run.Setup().goal == GoalKind::Gates) s.run.DrawGates();
+            if (s.atc.TrafficVisible() && !s.replay.on) s.scene.DrawTraffic(s.atc.Traffic(), s.time);
             EndMode3D();
         }
 
-        if (s.flying) {
+        if (s.replay.on) {
+            DrawReplayOverlay(s);
+        } else if (s.flying) {
             bool below = !s.env.overcast || s.scene.camera.position.y < s.env.cloudBase;
             if (s.cam == CamMode::Cockpit) s.fx.DrawWindshield(s.env, s.aircraft.ias, below);
             HudInfo info;
@@ -602,6 +810,7 @@ int main()
                 info.missionLines = s.run.HudLines(s.aircraft);
             }
             DrawHud(s.aircraft, s.ctl, s.warnings, s.terrain, s.scene.camera, info);
+            s.atc.Draw();
             // Снаружи (вид сзади и т. п.) эффекты слабее: это ощущения пилота.
             float k = s.cam == CamMode::Cockpit ? 1.0f : 0.5f;
             float frost = (s.cam == CamMode::Cockpit && s.aircraft.Type().kind == AircraftKind::Prop) ? s.aircraft.ice : 0.0f;
@@ -632,12 +841,14 @@ int main()
         case MenuAction::ToMain: ShowMenu(s, act.index == 1 ? MenuScreen::Missions : MenuScreen::Main); break;
         case MenuAction::Quit: s.quit = true; break;
         case MenuAction::SettingsChanged: SetMasterVolume(s.cfg.volume / 100.0f); break;
+        case MenuAction::Replay: StartReplay(s, s.menu.Screen()); break;
         default: break;
         }
         if (s.cfg.showFps) DrawFPS(GetScreenWidth() - 90, 6);
         EndDrawing();
     }
 
+    CloseLog(s);
     s.cfg.Save();
     s.terrain.Unload();
     s.map.Unload();

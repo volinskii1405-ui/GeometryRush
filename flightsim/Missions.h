@@ -9,7 +9,7 @@ class Terrain;
 class WarningSystem;
 
 enum class StartKind { Runway, Final, Air };
-enum class GoalKind { None, Takeoff, Land, Gates };
+enum class GoalKind { None, Takeoff, Land, Gates, Recover, Spin, GoAround };
 enum class FailPlan { None, Random, EngineAtV1, FireAfterTakeoff, GearHydraulics, FlapsJam, LowFuel };
 
 // Всё, что нужно, чтобы начать полёт (и задание, и свободный полёт).
@@ -24,6 +24,8 @@ struct FlightSetup {
     float finalNm = 6;                 // удаление при старте на заходе
     Vector3 airPos{};                  // старт в воздухе (y — высота, ft)
     float airHdg = 90, airSpeedKt = 200;
+    float airBankDeg = 0, airPitchDeg = 0;   // положение при старте в воздухе (спираль)
+    bool microburst = false;           // микропорыв (сдвиг ветра) на глиссаде
     float fuelFrac = -1;               // доля от полной заправки (-1 — обычная)
     FailPlan fail = FailPlan::None;
     GoalKind goal = GoalKind::None;
@@ -69,6 +71,7 @@ public:
     std::vector<Criterion> criteria;
     std::string resultText;
     float time = 0;
+    float throttle = 0;   // положение РУД (задаёт вызывающий код) — для проверки TOGA
     // для итогов
     float tdFpm = 0, tdCenterline = 0, tdDistance = 0;
     bool touched = false;
@@ -90,4 +93,12 @@ private:
     std::vector<Gate> gates_;
     int nextGate_ = 0, gatesPassed_ = 0;
     float prevSide_ = 0;
+    // вывод из спирали и штопора
+    float startAltFt_ = 0, minAltFt_ = 0, holdOk_ = 0, maxG_ = 1;
+    bool overspeedSeen_ = false;
+    float spinTurns_ = 0, turnsAfterRecovery_ = 0, prevHdg_ = 0;
+    bool spinDeveloped_ = false, recovering_ = false;
+    // уход на второй круг при сдвиге ветра
+    bool shearSeen_ = false, togaInTime_ = false;
+    float shearTime_ = -1, minRaFt_ = 1e9f;
 };

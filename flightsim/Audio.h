@@ -18,6 +18,7 @@ public:
     void PlayCrash();
     void PlayTouchdown(float strength, float speedMs);
     void PlayClick();
+    void PlayRadio();   // щелчок тангенты и шум в эфире перед сообщением диспетчера
     void StopAll();
 
 private:
@@ -26,7 +27,7 @@ private:
     bool ready_ = false;
     AudioStream engine_{};
     Sound alerts_[(int)Alert::Count] = {};
-    Sound crash_{}, touchdown_{}, click_{}, apOff_{}, chime_{};
+    Sound crash_{}, touchdown_{}, click_{}, apOff_{}, chime_{}, radio_{};
     // механика: шасси, закрылки, триммер, шины
     Sound gearThump_{}, gearMotor_{}, flapMotor_{}, trimTick_{}, screech_{};
     float prevGear_ = -1, prevFlaps_ = -1, prevTrim_ = 0, trimTimer_ = 0;

@@ -140,6 +140,44 @@ std::vector<MissionDef> BuildMissions()
         "The flaps are jammed up. Approach much faster (~175 kt), touch down early and stop with reverse and brakes.",
         "Закрылки заклинило в убранном положении. Заход на большой скорости (~175 kt), садитесь в начале полосы, реверс и тормоза.",
         3, s);
+
+    s = Make(AircraftKind::Prop, StartKind::Air, GoalKind::Recover);
+    s.weather = WeatherKind::Overcast;
+    s.airPos = {-4500, 4200, 5200};
+    s.airHdg = 40;
+    s.airSpeedKt = 120;
+    s.airBankDeg = 50;
+    s.airPitchDeg = -14;
+    add("spiral", "Spiral dive in cloud", "Спираль в облаках",
+        "In cloud without a horizon the Cessna has slipped into a spiral dive: steep bank, nose down, speed rising. "
+        "Recover on instruments: throttle to idle, roll the wings level FIRST, then pull out gently (below 3.8 G).",
+        "В облаках без горизонта «Сессна» незаметно ушла в спираль: большой крен, нос вниз, скорость растёт. "
+        "Выведите по приборам: РУД на малый газ, СНАЧАЛА крен в ноль (элероны), потом плавно на себя (не больше 3.8 G).",
+        2, s);
+
+    s = Make(AircraftKind::Prop, StartKind::Air, GoalKind::Spin);
+    s.airPos = {-6000, 6500, 4000};
+    s.airHdg = 90;
+    s.airSpeedKt = 75;
+    add("spin", "Spin", "Штопор",
+        "At 6500 ft: idle, pull the yoke fully back and as the stall comes kick full rudder - the Cessna spins. "
+        "After at least one turn recover: idle, opposite rudder, yoke forward, ailerons neutral; when the rotation stops - "
+        "rudder neutral and pull out of the dive gently.",
+        "На 6500 ft: малый газ, штурвал полностью на себя, на сваливании — педаль до упора: «Сессна» сорвётся в штопор. "
+        "После хотя бы одного витка выводите: малый газ, педаль против вращения, штурвал от себя, элероны нейтрально; "
+        "вращение прекратилось — педали нейтрально и плавно выводите из пикирования.",
+        3, s);
+
+    s = Make(AircraftKind::Airliner, StartKind::Final, GoalKind::GoAround);
+    s.finalNm = 7;
+    s.microburst = true;
+    s.wind = 1;
+    add("windshear", "Windshear", "Сдвиг ветра",
+        "A thunderstorm cell sits on the approach: a microburst. First a headwind gust, then a strong downdraft and tailwind. "
+        "At \"WINDSHEAR\": TOGA immediately (X) - full power, pitch up to 15-17 deg, do not change configuration, climb away.",
+        "На глиссаде грозовой микропорыв: сначала встречный порыв, потом мощный нисходящий поток и попутный ветер. "
+        "По сигналу «WINDSHEAR» — сразу TOGA (X): полная тяга, тангаж 15–17°, механизацию не трогать, уходите на второй круг.",
+        3, s);
     return m;
 }
 
@@ -172,6 +210,16 @@ void MissionRun::Start(const FlightSetup& s, const Terrain& t)
     randomFailAt_ = (float)GetRandomValue(90, 480);
     gates_.clear();
     nextGate_ = gatesPassed_ = 0;
+    startAltFt_ = minAltFt_ = s.airPos.y;
+    holdOk_ = 0;
+    maxG_ = 1;
+    overspeedSeen_ = false;
+    spinTurns_ = turnsAfterRecovery_ = 0;
+    prevHdg_ = s.airHdg;
+    spinDeveloped_ = recovering_ = false;
+    shearSeen_ = togaInTime_ = false;
+    shearTime_ = -1;
+    minRaFt_ = 1e9f;
     prevSide_ = 0;
     if (s.goal == GoalKind::Gates) {
         // 10 ворот вдоль трассы, низко над рельефом.
@@ -331,6 +379,83 @@ void MissionRun::Update(Aircraft& a, const WarningSystem& w, const Terrain& t, f
         }
         break;
     }
+    case GoalKind::Recover: {
+        // Выведен: крыло горизонтально, нос у горизонта, снижение прекратилось — 3 с подряд.
+        const float altFt = a.pos.y * M_TO_FT;
+        minAltFt_ = fminf(minAltFt_, altFt);
+        maxG_ = fmaxf(maxG_, a.gLoad);
+        if (iasKt > ty.vmo) overspeedSeen_ = true;
+        bool level = fabsf(a.BankDeg()) < 10.0f && a.PitchDeg() > -5.0f && a.PitchDeg() < 15.0f && a.vel.y * MS_TO_FPM > -500.0f;
+        holdOk_ = level ? holdOk_ + dt : 0.0f;
+        if (a.Broken()) {
+            criteria.clear();
+            Finish(false, a.damage);
+        } else if (holdOk_ > 3.0f) {
+            float lost = startAltFt_ - minAltFt_;
+            criteria = {{L("Recovered without breaking up", "Выведен без разрушения"), true},
+                        {TextFormat(L("No overstress or overspeed (max %.1f G)", "Без перегрузки и превышения скорости (до %.1f G)"), maxG_),
+                         !a.overstressed && !overspeedSeen_},
+                        {TextFormat(L("Altitude lost under 1000 ft (%.0f)", "Потеря высоты меньше 1000 ft (%.0f)"), lost), lost < 1000.0f}};
+            Finish(true, L("Spiral dive recovered!", "Спираль выведена!"));
+        }
+        break;
+    }
+    case GoalKind::Spin: {
+        // Витки считаем по курсу, пока штопор развит; «вывод» — с момента, когда вращение начало затухать.
+        const float hdg = a.HeadingDeg();
+        float dh = fabsf(WrapDeg180(hdg - prevHdg_));
+        prevHdg_ = hdg;
+        if (a.spin > 0.8f) spinDeveloped_ = true;
+        if (spinDeveloped_ && !recovering_) {
+            spinTurns_ += dh / 360.0f;
+            if (spinTurns_ >= 1.0f && a.spin < 0.9f) recovering_ = true;
+            if (a.spin <= 0.0f && spinTurns_ < 1.0f) spinDeveloped_ = false, spinTurns_ = 0;   // сорвался слишком рано
+        } else if (recovering_ && a.spin > 0.0f) {
+            turnsAfterRecovery_ += dh / 360.0f;
+        }
+        if (recovering_) {
+            maxG_ = fmaxf(maxG_, a.gLoad);
+            if (iasKt > ty.vmo) overspeedSeen_ = true;
+        } else {
+            startAltFt_ = a.pos.y * M_TO_FT;
+        }
+        minAltFt_ = fminf(minAltFt_, a.pos.y * M_TO_FT);
+        bool level = a.spin <= 0.0f && fabsf(a.BankDeg()) < 15.0f && a.PitchDeg() > -5.0f && a.vel.y * MS_TO_FPM > -500.0f;
+        holdOk_ = (recovering_ && level) ? holdOk_ + dt : 0.0f;
+        if (a.Broken()) {
+            criteria.clear();
+            Finish(false, a.damage);
+        } else if (holdOk_ > 3.0f) {
+            criteria = {{TextFormat(L("Spun %.1f turns and recovered", "Штопор %.1f витка и вывод"), spinTurns_), true},
+                        {TextFormat(L("Rotation stopped within 1 turn (%.1f)", "Вращение остановлено за 1 виток (%.1f)"), turnsAfterRecovery_),
+                         turnsAfterRecovery_ <= 1.0f},
+                        {TextFormat(L("Gentle pull-out: no overstress/overspeed (%.1f G)", "Плавный вывод: без перегрузки и превышения (%.1f G)"), maxG_),
+                         !a.overstressed && !overspeedSeen_}};
+            Finish(true, L("Spin recovered!", "Штопор выведен!"));
+        }
+        break;
+    }
+    case GoalKind::GoAround: {
+        // Сдвиг ветра: по сигналу — TOGA за 3 с, набрать 1500 ft над землёй.
+        if (w.Active(Alert::Windshear) && !shearSeen_) {
+            shearSeen_ = true;
+            shearTime_ = time;
+        }
+        if (shearSeen_) {
+            minRaFt_ = fminf(minRaFt_, a.onGround ? 0.0f : w.radioAltFt);
+            if (!togaInTime_ && time - shearTime_ <= 3.0f && throttle >= 0.95f) togaInTime_ = true;
+        }
+        if (a.onGround && touched) {
+            criteria.clear();
+            Finish(false, L("You landed in the windshear - a go-around was required", "Вы сели в сдвиг ветра — нужно было уходить на второй круг"));
+        } else if (shearSeen_ && w.radioAltFt > 1500.0f && a.vel.y > 0.0f) {
+            criteria = {{L("Escaped the microburst and climbed to 1500 ft", "Ушли из микропорыва и набрали 1500 ft"), true},
+                        {L("TOGA within 3 s of the warning", "TOGA в течение 3 с после сигнала"), togaInTime_},
+                        {TextFormat(L("Kept above 300 ft (lowest %.0f ft)", "Не ниже 300 ft (минимум %.0f ft)"), minRaFt_), minRaFt_ >= 300.0f}};
+            Finish(true, L("Windshear escape!", "Выход из сдвига ветра!"));
+        }
+        break;
+    }
     default: break;
     }
     (void)t;
@@ -370,6 +495,29 @@ std::vector<std::string> MissionRun::HudLines(const Aircraft& a) const
                                    gates_[nextGate_].pos.y * M_TO_FT));
         }
         v.push_back(TextFormat(L("Passed %d   time %.0f s", "Пройдено %d   время %.0f с"), gatesPassed_, time));
+        break;
+    case GoalKind::Recover:
+        v.push_back(TextFormat(L("Bank %.0f, pitch %.0f, %.0f kt", "Крен %.0f°, тангаж %.0f°, %.0f kt"), a.BankDeg(), a.PitchDeg(), a.ias * MS_TO_KT));
+        v.push_back(fabsf(a.BankDeg()) > 15.0f ? L("1) idle  2) wings level  3) then pull", "1) малый газ  2) крен в ноль  3) потом на себя")
+                                               : L("Wings level - now pull out gently", "Крыло в горизонте — теперь плавно на себя"));
+        v.push_back(TextFormat(L("Altitude lost %.0f ft", "Потеряно высоты %.0f ft"), startAltFt_ - minAltFt_));
+        break;
+    case GoalKind::Spin:
+        if (!spinDeveloped_)
+            v.push_back(L("Idle, yoke full back, at the stall - full rudder", "Малый газ, штурвал на себя, на сваливании — педаль до упора"));
+        else if (!recovering_)
+            v.push_back(TextFormat(L("SPIN: %.1f turns - after 1 turn recover!", "ШТОПОР: %.1f витка — после 1 витка выводите!"), spinTurns_));
+        else if (a.spin > 0.0f)
+            v.push_back(L("Opposite rudder, yoke forward, ailerons neutral", "Педаль против вращения, штурвал от себя, элероны нейтрально"));
+        else
+            v.push_back(L("Rotation stopped: rudder neutral, pull out gently", "Вращение остановлено: педали нейтрально, плавно из пикирования"));
+        v.push_back(TextFormat(L("Altitude %.0f ft", "Высота %.0f ft"), a.pos.y * M_TO_FT));
+        break;
+    case GoalKind::GoAround:
+        if (!shearSeen_) v.push_back(L("ILS 09 approach. Microburst reported on final", "Заход ILS 09. На глиссаде — микропорыв"));
+        else
+            v.push_back(TextFormat(L("TOGA! Pitch 15, climb to 1500 ft AGL (now %.0f)", "TOGA! Тангаж 15°, наберите 1500 ft над землёй (сейчас %.0f)"),
+                                   a.pos.y * M_TO_FT - world::GetAirport(0).rwy.center.y * M_TO_FT));
         break;
     default: break;
     }

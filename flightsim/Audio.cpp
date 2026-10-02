@@ -112,6 +112,14 @@ void AudioSystem::Init()
         }
         alerts_[(int)Alert::Stall] = MakeSound(b);
     }
+    {   // «Windshear»: без записи — три резкие двойные ноты
+        auto b = Buffer(2.0f);
+        for (int k = 0; k < 3; ++k) {
+            Tone(b, k * 0.6f, 0.2f, 900, 900, 0.45f);
+            Tone(b, k * 0.6f + 0.22f, 0.2f, 700, 700, 0.45f);
+        }
+        alerts_[(int)Alert::Windshear] = MakeSound(b);
+    }
     {
         auto b = Buffer(2.5f);
         float lp = 0;
@@ -162,6 +170,18 @@ void AudioSystem::Init()
         for (int rep = 0; rep < 2; ++rep)
             for (int k = 0; k < 4; ++k) Tone(b, rep * 0.75f + k * 0.11f, k == 3 ? 0.3f : 0.1f, notes[k], notes[k], 0.35f, 1.2f);
         apOff_ = MakeSound(b);
+    }
+    {   // радио: щелчок и короткий шум эфира
+        auto b = Buffer(0.35f);
+        float lp = 0, hp = 0;
+        for (size_t i = 0; i < b.size(); ++i) {
+            float t = (float)i / RATE, n = Noise();
+            lp += 0.35f * (n - lp);
+            hp += 0.05f * (lp - hp);
+            float env = (t < 0.01f ? 1.0f : 0.0f) + 0.5f * fminf(t / 0.02f, 1.0f) * expf(-t * 9.0f);
+            b[i] = env * (lp - hp) * 0.8f;
+        }
+        radio_ = MakeSound(b);
     }
     {   // стук шасси о замки: глухой удар и металлический лязг
         auto b = Buffer(0.5f);
@@ -236,7 +256,7 @@ void AudioSystem::Init()
         {Alert::PullUp, "pull_up.ogg"},       {Alert::Terrain, "terrain.ogg"},
         {Alert::SinkRate, "sink_rate.ogg"},   {Alert::TooLowGear, "too_low_gear.ogg"},
         {Alert::BankAngle, "bank_angle.ogg"}, {Alert::Overspeed, "overspeed.ogg"},
-        {Alert::Stall, "stall.ogg"},
+        {Alert::Stall, "stall.ogg"},          {Alert::Windshear, "windshear.ogg"},
     };
     for (const File& f : files) {
         const char* path = TextFormat("%ssounds/%s", GetApplicationDirectory(), f.name);
@@ -267,6 +287,7 @@ void AudioSystem::Shutdown()
     UnloadSound(crash_);
     UnloadSound(touchdown_);
     UnloadSound(click_);
+    UnloadSound(radio_);
     for (Sound* snd : {&gearThump_, &gearMotor_, &flapMotor_, &trimTick_, &screech_}) UnloadSound(*snd);
     UnloadSound(apOff_);
     UnloadSound(chime_);
@@ -411,6 +432,11 @@ void AudioSystem::StopAll()
     StopSound(gearMotor_);
     StopSound(flapMotor_);
     prevGear_ = prevFlaps_ = -1;
+}
+
+void AudioSystem::PlayRadio()
+{
+    if (ready_) PlaySound(radio_);
 }
 
 void AudioSystem::PlayClick()

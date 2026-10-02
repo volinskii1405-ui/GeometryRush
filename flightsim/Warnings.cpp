@@ -7,6 +7,8 @@ using namespace fs;
 
 void WarningSystem::Reset()
 {
+    shearF = 0;
+    havePrevWind_ = false;
     for (int i = 0; i < N; ++i) {
         active_[i] = false;
         hold_[i] = 0;
@@ -19,6 +21,7 @@ const char* WarningSystem::Text(Alert a)
 {
     switch (a) {
     case Alert::PullUp: return "PULL UP! TERRAIN";
+    case Alert::Windshear: return "WINDSHEAR";
     case Alert::Terrain: return "TERRAIN";
     case Alert::SinkRate: return "SINK RATE";
     case Alert::TooLowGear: return "TOO LOW - GEAR";
@@ -40,7 +43,7 @@ const char* WarningSystem::Text(Alert a)
 
 bool WarningSystem::IsWarning(Alert a)
 {
-    return a == Alert::PullUp || a == Alert::Overspeed || a == Alert::Stall || a == Alert::EngFire || a == Alert::Structure;
+    return a == Alert::PullUp || a == Alert::Overspeed || a == Alert::Stall || a == Alert::EngFire || a == Alert::Structure || a == Alert::Windshear;
 }
 
 bool WarningSystem::AnyWarning() const
@@ -59,7 +62,7 @@ bool WarningSystem::AnyCaution() const
 
 Alert WarningSystem::TopVoice() const
 {
-    const Alert order[] = {Alert::PullUp, Alert::Terrain, Alert::SinkRate, Alert::TooLowGear, Alert::BankAngle};
+    const Alert order[] = {Alert::Windshear, Alert::PullUp, Alert::Terrain, Alert::SinkRate, Alert::TooLowGear, Alert::BankAngle};
     for (Alert a : order)
         if (active_[(int)a]) return a;
     return Alert::Count;
@@ -124,6 +127,19 @@ void WarningSystem::Update(const Aircraft& a, const Terrain& t, float dt)
         cond[(int)Alert::FlapsJam] = a.Failed(Failure::FlapsJam);
         cond[(int)Alert::FuelLow] = a.fuel < a.Type().maxFuel * 0.08f;
         cond[(int)Alert::Structure] = a.Broken();
+
+        // Сдвиг ветра (реактивный, как у Boeing/Airbus): F = −(dWx/dt)/g − w/V — сколько энергии
+        // самолёт теряет из-за ветра. Потеря встречного ветра и нисходящий поток дают F > 0.
+        float gsx = a.vel.x, gsz = a.vel.z, gsl = sqrtf(gsx * gsx + gsz * gsz);
+        if (gsl > 20.0f && dt > 0.0f) {
+            float headwind = -(a.windNow.x * gsx + a.windNow.z * gsz) / gsl;
+            float dHw = havePrevWind_ ? (headwind - prevHeadwind_) / dt : 0.0f;
+            float F = -dHw / G - a.windNow.y / fmaxf(a.tas, 30.0f);
+            shearF += (F - shearF) * fminf(dt / 1.0f, 1.0f);
+            prevHeadwind_ = headwind;
+            havePrevWind_ = true;
+        }
+        cond[(int)Alert::Windshear] = airborne && radioAltFt < 1500.0f && shearF > 0.105f;
         cond[(int)Alert::Overstress] = a.overstressed && !a.Broken();
         cond[(int)Alert::Ice] = a.ice > 0.05f && (!a.lastAntiIce || a.Type().kind == AircraftKind::Prop);
         cond[(int)Alert::BrakesHot] = fmaxf(a.brakeTemp[0], a.brakeTemp[1]) > Aircraft::BRAKES_HOT;
@@ -131,7 +147,7 @@ void WarningSystem::Update(const Aircraft& a, const Terrain& t, float dt)
 
     for (int i = 0; i < N; ++i) {
         // Удержание сигнала после исчезновения условия — без «мигания» на границе.
-        float holdTime = (i == (int)Alert::Overspeed || i == (int)Alert::Stall) ? 0.3f : 1.0f;
+        float holdTime = (i == (int)Alert::Overspeed || i == (int)Alert::Stall) ? 0.3f : (i == (int)Alert::Windshear ? 4.0f : 1.0f);
         if (cond[i]) hold_[i] = holdTime;
         else hold_[i] = fmaxf(hold_[i] - dt, 0.0f);
         active_[i] = cond[i] || hold_[i] > 0.0f;
