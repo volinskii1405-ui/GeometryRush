@@ -41,10 +41,12 @@ void Autopilot::ToggleNav(const Aircraft& a)
         return;
     }
     navOn = true;
+    if (activeWp == 0) resetLeg_ = true;   // первый участок — от текущего положения
 }
 
 void Autopilot::AddWaypoint(Vector3 pos, const char* name, float altFt)
 {
+    if (!RouteActive()) resetLeg_ = true;   // маршрут был пройден — к новой точке прямо от самолёта
     Waypoint w;
     w.pos = pos;
     snprintf(w.name, sizeof w.name, "%s", name);
@@ -56,6 +58,16 @@ void Autopilot::RemoveLastWaypoint()
 {
     if (route.empty()) return;
     route.pop_back();
+    if (activeWp > (int)route.size()) activeWp = (int)route.size();
+    if (!RouteActive()) navOn = false;
+}
+
+void Autopilot::RemoveWaypoint(int i)
+{
+    if (i < 0 || i >= (int)route.size()) return;
+    if (i == activeWp) resetLeg_ = true;   // удалили активную — прямо на следующую
+    route.erase(route.begin() + i);
+    if (i < activeWp) --activeWp;
     if (activeWp > (int)route.size()) activeWp = (int)route.size();
     if (!RouteActive()) navOn = false;
 }
@@ -182,41 +194,55 @@ void Autopilot::Update(const Aircraft& a, float raFt, Controls& c, float dt)
     if (locCaptured && !ils.valid) locCaptured = gsCaptured = false;
     if (locCaptured) appArmed = false;
 
-    // ------------------------------------------------ маршрут: путевой угол на активную точку и её смена
+    // ------------------------------------------------ маршрут: наведение L1 и смена точек
+    // Самолёт целится в точку на линии участка на расстоянии L1 впереди (≈10 с полёта) и держит
+    // боковое ускорение 2·V²/L1·sin(η) — плавный выход на линию без раскачки, как в настоящих автопилотах.
     const float gsMs = sqrtf(a.vel.x * a.vel.x + a.vel.z * a.vel.z);
     const float trkNow = gsMs > 20.0f ? WrapDeg360(atan2f(a.vel.x, -a.vel.z) * RAD2DEG) : hdg;
+    float navBank = 0.0f;
     if (RouteActive()) {
+        if (resetLeg_ || (!navOn && activeWp == 0)) {
+            legFrom_ = a.pos;
+            direct_ = true;
+            resetLeg_ = false;
+        }
         const Waypoint& to = route[activeWp];
+        const Vector3 from = (direct_ || activeWp == 0) ? legFrom_ : route[activeWp - 1].pos;
         float dx = to.pos.x - a.pos.x, dz = to.pos.z - a.pos.z;
         navDistM = sqrtf(dx * dx + dz * dz);
-        float bearing = WrapDeg360(atan2f(dx, -dz) * RAD2DEG);
-        navTrack = bearing;
-        bool passed = false;   // точка уже на траверзе или позади
-        if (activeWp > 0) {
-            // Держим линию участка: при уходе вбок — подворот к ней под углом до 30°.
-            Vector3 from = route[activeWp - 1].pos;
-            float lx = to.pos.x - from.x, lz = to.pos.z - from.z;
-            float len = fmaxf(sqrtf(lx * lx + lz * lz), 1.0f);
-            float legTrk = atan2f(lx / len, -lz / len) * RAD2DEG;
-            float rx = cosf(legTrk * DEG2RAD), rz = sinf(legTrk * DEG2RAD);   // вправо от линии
-            float xtk = (a.pos.x - from.x) * rx + (a.pos.z - from.z) * rz;
-            float along = (a.pos.x - from.x) * lx / len + (a.pos.z - from.z) * lz / len;
-            if (along < len) navTrack = WrapDeg360(legTrk - Clampf(xtk * 0.04f, -45.0f, 45.0f));
-            passed = along >= len;
-        }
+        float lx = to.pos.x - from.x, lz = to.pos.z - from.z;
+        float len = sqrtf(lx * lx + lz * lz);
+        float ux = len > 1.0f ? lx / len : dx / fmaxf(navDistM, 1.0f), uz = len > 1.0f ? lz / len : dz / fmaxf(navDistM, 1.0f);
+        float relx = a.pos.x - from.x, relz = a.pos.z - from.z;
+        float along = relx * ux + relz * uz;
+        navXtkM = relx * -uz + relz * ux;   // вправо от линии: (−uz, ux)
+        // Далеко от линии L1 растёт вместе с уклонением: выход на линию под углом не круче ~55°, без перелёта.
+        const float L1 = fmaxf(Clampf(gsMs * 10.0f, 350.0f, 2500.0f), 1.2f * fabsf(navXtkM));
+        float aimAlong = along + sqrtf(fmaxf(L1 * L1 - navXtkM * navXtkM, 0.0f));
+        float ax = from.x + ux * aimAlong - a.pos.x, az = from.z + uz * aimAlong - a.pos.z;
+        navTrack = WrapDeg360(atan2f(ax, -az) * RAD2DEG);
+        float eta = WrapDeg180(navTrack - trkNow) * DEG2RAD;
+        if (fabsf(eta) > PI * 0.5f) eta = Sign(eta) * PI * 0.5f;   // цель сзади — разворот с полным креном
+        float aLat = 2.0f * gsMs * gsMs / L1 * sinf(eta);
+        navBank = Clampf(atanf(aLat / G) * RAD2DEG, -25.0f, 25.0f);
+
+        // Упреждение разворота по радиусу виража 25°, но не больше половины следующего участка.
         const float radius = gsMs * gsMs / (G * tanf(25.0f * DEG2RAD));
-        // Точка сбоку и сзади ближе радиуса виража — к ней уже не довернуть, считаем пройденной.
-        if (navDistM < radius && fabsf(WrapDeg180(bearing - trkNow)) > 100.0f) passed = true;
-        // Упреждение разворота: начинаем поворачивать на следующий участок заранее, по радиусу виража 25°.
-        float lead = 250.0f;
+        float lead = 60.0f;
         if (activeWp + 1 < (int)route.size()) {
             const Waypoint& nx = route[activeWp + 1];
-            float nextTrk = atan2f(nx.pos.x - to.pos.x, -(nx.pos.z - to.pos.z)) * RAD2DEG;
-            float turn = fabsf(WrapDeg180(nextTrk - bearing)) * DEG2RAD;
-            lead = Clampf(radius * tanf(fminf(turn, 2.4f) * 0.5f), 250.0f, 5000.0f);
+            float nlx = nx.pos.x - to.pos.x, nlz = nx.pos.z - to.pos.z, nlen = sqrtf(nlx * nlx + nlz * nlz);
+            float turn = fabsf(WrapDeg180(atan2f(nlx, -nlz) * RAD2DEG - atan2f(ux, -uz) * RAD2DEG)) * DEG2RAD;
+            lead = Clampf(radius * tanf(fminf(turn, 0.5f * PI) * 0.5f), 60.0f, fminf(0.5f * nlen, 3000.0f));
         }
-        if (!a.onGround && (navDistM < (navOn ? lead : 600.0f) || passed)) {
+        float remaining = len > 1.0f ? len - along : navDistM;
+        // Точку прошли: до неё по линии меньше упреждения, или она уже на траверзе/позади.
+        if (!a.onGround && (navDistM <= (navOn ? lead : 300.0f) || remaining < 0.0f)) {
             ++activeWp;
+            // Следующий участок — прямо от того места, где самолёт начал разворот: после виража
+            // он сразу на линии и не «догоняет» линию между точками.
+            legFrom_ = a.pos;
+            direct_ = true;
             if (!RouteActive() && navOn) {   // последняя точка: дальше прежним курсом
                 navOn = false;
                 hdgBug = WrapDeg360(roundf(hdg));
@@ -224,6 +250,30 @@ void Autopilot::Update(const Aircraft& a, float raFt, Controls& c, float dt)
         }
     } else {
         navOn = false;
+        navXtkM = 0;
+    }
+
+    // ------------------------------------------------ VNAV: высоты точек маршрута
+    // Ближайшая впереди точка с высотой: набор — сразу, снижение — по прямой так, чтобы прийти на неё на высоте.
+    vnavActive = false;
+    if (navOn && vnavOn && RouteActive() && !gsCaptured && !goAround_ && !takeoff_ && !vsMode_) {
+        float dist = navDistM;
+        for (int k = activeWp; k < (int)route.size(); ++k) {
+            if (k > activeWp) dist += Vector2Distance({route[k - 1].pos.x, route[k - 1].pos.z}, {route[k].pos.x, route[k].pos.z});
+            if (route[k].altFt <= 0.0f) continue;
+            altTarget = route[k].altFt;
+            float diff = altTarget - altFt;
+            const AircraftType& t = a.Type();
+            float maxDesc = t.kind == AircraftKind::Prop ? 1000.0f : 3000.0f;
+            if (diff < -150.0f) {
+                float minutes = dist / fmaxf(gsMs, 20.0f) / 60.0f;
+                vnavVs_ = Clampf(diff / fmaxf(minutes, 0.1f) * 1.15f, -maxDesc, -200.0f);
+            } else {
+                vnavVs_ = Clampf(diff * 4.0f, -maxDesc, t.jet ? 2500.0f : 700.0f);
+            }
+            vnavActive = true;
+            break;
+        }
     }
     lat = locCaptured ? Lat::Loc : (navOn ? Lat::Nav : Lat::Hdg);
     if (gsCaptured) vsMode_ = goAround_ = false;
@@ -238,7 +288,7 @@ void Autopilot::Update(const Aircraft& a, float raFt, Controls& c, float dt)
         if (sqrtf(a.vel.x * a.vel.x + a.vel.z * a.vel.z) > 20.0f) trk = WrapDeg360(atan2f(a.vel.x, -a.vel.z) * RAD2DEG);
         bankCmd = Clampf(WrapDeg180(desiredTrk - trk) * 2.0f, -20.0f, 20.0f);
     } else if (lat == Lat::Nav) {
-        bankCmd = Clampf(WrapDeg180(navTrack - trkNow) * 1.5f, -25.0f, 25.0f);
+        bankCmd = navBank;
     } else {
         bankCmd = Clampf(WrapDeg180(hdgBug - hdg) * 1.5f, -25.0f, 25.0f);
     }
@@ -260,7 +310,9 @@ void Autopilot::Update(const Aircraft& a, float raFt, Controls& c, float dt)
             gammaCmd = Clampf(-3.0f - ils.gsDevDeg * 2.5f, -6.0f, 0.0f);
         } else {
             float maxClimb = ty.jet ? 2500.0f : 700.0f;
-            float vsCmd = vert == Vert::Vs ? vsTarget : Clampf((altTarget - altFt) * 4.0f, -2000.0f, maxClimb);
+            float vsCmd = vert == Vert::Vs ? vsTarget
+                        : vnavActive ? vnavVs_
+                        : Clampf((altTarget - altFt) * 4.0f, -2000.0f, maxClimb);
             // Защита скорости: не набирать высоту ценой сваливания.
             float vMin = a.StallSpeedKt() * 1.25f;
             if (vsCmd > 0 && iasKt < vMin + 15.0f) vsCmd *= Clampf((iasKt - vMin) / 15.0f, 0.0f, 1.0f);

@@ -726,6 +726,7 @@ void DrawFma(float x, float y)
     case Autopilot::Vert::Vs: vert = TextFormat("V/S %+d", (int)ap.vsTarget); break;
     default: vert = TextFormat("ALT %d", (int)ap.altTarget); break;
     }
+    if (ap.vnavActive) vert = TextFormat("VNAV %d", (int)ap.altTarget);
     box(vert, kGreen, vertArmed, 130 * S);
     box(ap.apOn ? "AP" : "AP OFF", ap.apOn ? kGreen : Color{150, 150, 150, 255}, ap.fdOn ? "FD" : nullptr, 90 * S);
 }

@@ -561,8 +561,10 @@ void HandleFlightInput(Sim& s, float dt)
     auto step = [](int key) { return IsKeyPressed(key) || IsKeyPressedRepeat(key); };
     if (step(KEY_NINE)) s.ap.hdgBug = WrapDeg360(s.ap.hdgBug - 1.0f);
     if (step(KEY_ZERO)) s.ap.hdgBug = WrapDeg360(s.ap.hdgBug + 1.0f);
-    if (step(KEY_MINUS)) s.ap.altTarget = fmaxf(s.ap.altTarget - 100.0f, 0.0f);
-    if (step(KEY_EQUAL)) s.ap.altTarget = fminf(s.ap.altTarget + 100.0f, 30000.0f);
+    if (!s.map.HasSelection()) {   // на карте с выбранной точкой −/= меняют её высоту
+        if (step(KEY_MINUS)) s.ap.altTarget = fmaxf(s.ap.altTarget - 100.0f, 0.0f);
+        if (step(KEY_EQUAL)) s.ap.altTarget = fminf(s.ap.altTarget + 100.0f, 30000.0f);
+    }
     if (step(KEY_COMMA)) s.ap.spdTarget = fmaxf(s.ap.spdTarget - 5.0f, 50.0f);
     if (step(KEY_PERIOD)) s.ap.spdTarget = fminf(s.ap.spdTarget + 5.0f, 350.0f);
     if (step(KEY_SEMICOLON)) s.ap.vsTarget = fmaxf(s.ap.vsTarget - 100.0f, -4000.0f);
@@ -605,6 +607,7 @@ void HandleFlightInput(Sim& s, float dt)
     if (IsKeyPressed(KEY_I)) { c.antiIce = !c.antiIce; s.audio.PlayClick(); }   // противообледенительная система
     if (IsKeyPressed(KEY_N)) s.map.open = !s.map.open;
     if (IsKeyPressed(KEY_F2)) { s.ap.ToggleNav(a); s.audio.PlayClick(); }
+    if (IsKeyPressed(KEY_F3)) { s.ap.vnavOn = !s.ap.vnavOn; s.audio.PlayClick(); }   // VNAV: высоты точек маршрута
     // Высотомер: F5/F6 — давление ±1 гПа, F7 — стандартное 1013 (STD) / давление района (QNH).
     if (step(KEY_F5)) c.baro = fmaxf(c.baro - 1.0f, 940.0f);
     if (step(KEY_F6)) c.baro = fminf(c.baro + 1.0f, 1060.0f);

@@ -43,10 +43,15 @@ public:
     std::vector<Waypoint> route;
     int activeWp = 0;                 // к какой точке летим (== route.size() — маршрут пройден)
     bool navOn = false;
+    bool vnavOn = true;               // VNAV: высоты точек маршрута выдерживает автопилот (F3)
+    bool vnavActive = false;          // сейчас ведёт по высоте маршрута
     float navTrack = 0, navDistM = 0; // заданный путевой угол и расстояние до активной точки
+    float navXtkM = 0;                // боковое уклонение от линии участка, м (+ — правее)
     void ToggleNav(const Aircraft& a);
     void AddWaypoint(Vector3 pos, const char* name, float altFt);
     void RemoveLastWaypoint();
+    void RemoveWaypoint(int i);
+    void RouteEdited() { resetLeg_ = true; }   // точку передвинули/добавили — пересчитать участок
     void ClearRoute();
     bool RouteActive() const { return activeWp < (int)route.size(); }
 
@@ -73,5 +78,9 @@ public:
 private:
     bool takeoff_ = false, goAround_ = false, vsMode_ = false;
     float prevIas_ = 0, accelKt_ = 0;
-    float baro_ = 1013.0f;   // установка высотомера: автопилот держит высоту по нему, как в жизни
+    float baro_ = 1013.0f;
+    // начало активного участка: предыдущая точка или (при «прямо на точку») положение самолёта
+    Vector3 legFrom_{};
+    bool direct_ = true, resetLeg_ = true;
+    float vnavVs_ = 0;   // установка высотомера: автопилот держит высоту по нему, как в жизни
 };

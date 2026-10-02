@@ -24,9 +24,11 @@ const char* ShortName(int i, bool ascii)
     return main ? L("Island", "Остров") : L("Pass", "Перевал");
 }
 
-struct Btn { Rectangle r; std::string label; int id; };   // id: 100+2·аэродром+торец — заход, 1 — очистить, 2 — NAV
+// id: 100+2·аэродром+торец — заход, 1 — очистить, 2 — NAV, 3 — VNAV,
+// 10..13 — высота выбранной точки −1000/−100/+100/+1000, 14 — без высоты, 15 — удалить точку.
+struct Btn { Rectangle r; std::string label; int id; };
 
-std::vector<Btn> Buttons(Rectangle area)
+std::vector<Btn> Buttons(Rectangle area, bool hasSel)
 {
     const float S = Sc();
     const float x = area.x + area.width + 20 * S, w = fminf(GetScreenWidth() - x - 20 * S, 300 * S);
@@ -42,8 +44,19 @@ std::vector<Btn> Buttons(Rectangle area)
         }
     }
     y += 8 * S;
-    b.push_back({{x, y, w * 0.48f, 30 * S}, L("NAV on/off (F2)", "NAV вкл/выкл (F2)"), 2});
-    b.push_back({{x + w * 0.52f, y, w * 0.48f, 30 * S}, L("Clear (Del)", "Очистить (Del)"), 1});
+    const float w3 = (w - 12 * S) / 3;
+    b.push_back({{x, y, w3, 30 * S}, "NAV (F2)", 2});
+    b.push_back({{x + w3 + 6 * S, y, w3, 30 * S}, "VNAV (F3)", 3});
+    b.push_back({{x + 2 * (w3 + 6 * S), y, w3, 30 * S}, L("Clear all", "Очистить"), 1});
+    if (hasSel) {
+        y += 36 * S + 30 * S;   // место под подпись выбранной точки
+        const float w4 = (w - 18 * S) / 4;
+        const char* alt[4] = {"-1000", "-100", "+100", "+1000"};
+        for (int i = 0; i < 4; ++i) b.push_back({{x + i * (w4 + 6 * S), y, w4, 30 * S}, alt[i], 10 + i});
+        y += 36 * S;
+        b.push_back({{x, y, w * 0.48f, 30 * S}, L("No altitude", "Без высоты"), 14});
+        b.push_back({{x + w * 0.52f, y, w * 0.48f, 30 * S}, L("Delete (Del)", "Удалить (Del)"), 15});
+    }
     return b;
 }
 
@@ -136,9 +149,26 @@ void NavMap::AddApproach(Autopilot& ap, int airport, int end) const
     ap.AddWaypoint(thr, TextFormat("RW%s", rw.ident[end]), roundf(rw.center.y * M_TO_FT + 50.0f));
 }
 
+int NavMap::HitWaypoint(const Autopilot& ap, Vector2 m) const
+{
+    int best = -1;
+    float bestD = 13.0f * Sc();
+    for (int i = 0; i < (int)ap.route.size(); ++i) {
+        float d = Vector2Distance(m, ToScreen(ap.route[i].pos.x, ap.route[i].pos.z));
+        if (d < bestD) best = i, bestD = d;
+    }
+    return best;
+}
+
+void NavMap::Select(const Autopilot& ap, int i) { sel_ = (i >= 0 && i < (int)ap.route.size()) ? i : -1; }
+
 void NavMap::Update(Autopilot& ap, const Aircraft& a)
 {
-    if (!open) return;
+    if (!open) {
+        dragging_ = false;
+        return;
+    }
+    if (sel_ >= (int)ap.route.size()) sel_ = -1;
     float wheel = GetMouseWheelMove();
     if (wheel != 0.0f) zoom_ = Clampf(zoom_ * powf(1.25f, wheel), 1.0f, 10.0f);
     // При увеличении карта следит за самолётом.
@@ -147,34 +177,97 @@ void NavMap::Update(Autopilot& ap, const Aircraft& a)
         float lim = half_ * (1.0f - 1.0f / zoom_);
         center_ = {Clampf(a.pos.x, -lim, lim), Clampf(a.pos.z, -lim, lim)};
     }
+    const bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+    auto changeAlt = [&](float delta) {
+        if (sel_ < 0) return;
+        Waypoint& w = ap.route[sel_];
+        float base = w.altFt > 0 ? w.altFt : roundf(a.pos.y * M_TO_FT / 100.0f) * 100.0f;
+        w.altFt = Clampf(base + delta, 500.0f, 30000.0f);
+    };
+    auto removeSel = [&]() {
+        if (sel_ >= 0) {
+            ap.RemoveWaypoint(sel_);
+            sel_ = sel_ < (int)ap.route.size() ? sel_ : (int)ap.route.size() - 1;
+        } else {
+            ap.RemoveLastWaypoint();
+        }
+    };
+    // Клавиши: −/= — высота выбранной точки (с Shift — по 1000), Del — удалить, Shift+Del — всё.
+    auto step = [](int key) { return IsKeyPressed(key) || IsKeyPressedRepeat(key); };
+    if (sel_ >= 0 && (step(KEY_EQUAL) || step(KEY_KP_ADD))) changeAlt(shift ? 1000.0f : 100.0f);
+    if (sel_ >= 0 && (step(KEY_MINUS) || step(KEY_KP_SUBTRACT))) changeAlt(shift ? -1000.0f : -100.0f);
     if (IsKeyPressed(KEY_DELETE) || IsKeyPressed(KEY_BACKSPACE)) {
-        ap.ClearRoute();
-        userWp_ = 0;
+        if (shift) {
+            ap.ClearRoute();
+            userWp_ = 0;
+            sel_ = -1;
+        } else {
+            removeSel();
+        }
     }
     const Rectangle area = Area();
     const Vector2 m = GetMousePosition();
+    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) dragging_ = false;
+    if (dragging_ && sel_ >= 0 && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+        // Перетаскивание точки.
+        Vector2 w = ToWorld({Clampf(m.x, area.x, area.x + area.width), Clampf(m.y, area.y, area.y + area.height)});
+        ap.route[sel_].pos.x = w.x;
+        ap.route[sel_].pos.z = w.y;
+        if (sel_ == ap.activeWp) ap.RouteEdited();
+        return;
+    }
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-        for (const Btn& b : Buttons(area)) {
+        for (const Btn& b : Buttons(area, sel_ >= 0)) {
             if (!CheckCollisionPointRec(m, b.r)) continue;
-            if (b.id == 1) { ap.ClearRoute(); userWp_ = 0; }
+            if (b.id == 1) { ap.ClearRoute(); userWp_ = 0; sel_ = -1; }
             else if (b.id == 2) ap.ToggleNav(a);
+            else if (b.id == 3) ap.vnavOn = !ap.vnavOn;
+            else if (b.id >= 10 && b.id <= 13) changeAlt(b.id == 10 ? -1000.0f : b.id == 11 ? -100.0f : b.id == 12 ? 100.0f : 1000.0f);
+            else if (b.id == 14 && sel_ >= 0) ap.route[sel_].altFt = 0;
+            else if (b.id == 15) removeSel();
             else if (b.id >= 100) AddApproach(ap, (b.id - 100) / 2, (b.id - 100) % 2);
             return;
         }
+        for (int i = 0; i < (int)rowRects_.size() && i < (int)ap.route.size(); ++i)
+            if (CheckCollisionPointRec(m, rowRects_[i])) {
+                Select(ap, i);
+                return;
+            }
         if (CheckCollisionPointRec(m, area)) {
+            int hit = HitWaypoint(ap, m);
+            if (hit >= 0) {   // взять точку: выбрать и тащить
+                Select(ap, hit);
+                dragging_ = true;
+                return;
+            }
+            // Новая точка берёт высоту предыдущей (можно поменять или убрать).
+            float alt = 0;
+            for (int i = (int)ap.route.size() - 1; i >= 0 && alt <= 0; --i) alt = ap.route[i].altFt;
             // Щелчок рядом с аэродромом — точка на нём, иначе — точка WPn.
             for (int i = 0; i < world::AirportCount(); ++i) {
                 const Runway& rw = world::GetAirport(i).rwy;
                 if (Vector2Distance(m, ToScreen(rw.center.x, rw.center.z)) < 14.0f * Sc()) {
                     ap.AddWaypoint({rw.center.x, rw.center.y, rw.center.z}, ShortName(i, true), 0);
+                    Select(ap, (int)ap.route.size() - 1);
                     return;
                 }
             }
             Vector2 w = ToWorld(m);
-            ap.AddWaypoint({w.x, 0, w.y}, TextFormat("WP%d", ++userWp_), 0);
+            ap.AddWaypoint({w.x, 0, w.y}, TextFormat("WP%d", ++userWp_), alt);
+            Select(ap, (int)ap.route.size() - 1);
         }
     }
-    if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && CheckCollisionPointRec(m, area)) ap.RemoveLastWaypoint();
+    if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && CheckCollisionPointRec(m, area)) {
+        int hit = HitWaypoint(ap, m);
+        if (hit >= 0) {
+            ap.RemoveWaypoint(hit);
+            if (sel_ == hit) sel_ = -1;
+            else if (sel_ > hit) --sel_;
+        } else {
+            ap.RemoveLastWaypoint();
+            if (sel_ >= (int)ap.route.size()) sel_ = -1;
+        }
+    }
 }
 
 void NavMap::Draw(const Aircraft& a, const Autopilot& ap, Vector3 wind, const std::vector<Vector2>& trail) const
@@ -231,6 +324,7 @@ void NavMap::Draw(const Aircraft& a, const Autopilot& ap, Vector3 wind, const st
             for (float k = 0; k < 1.0f; k += 0.06f) DrawLineEx(Vector2Lerp(ac, p, k), Vector2Lerp(ac, p, k + 0.03f), 1.5f * S, kMagenta);
         }
         Color wc = done ? Color{150, 150, 150, 255} : (i == ap.activeWp ? WHITE : kMagenta);
+        if (i == sel_) DrawCircleLines((int)p.x, (int)p.y, 12 * S, Color{255, 230, 90, 255});
         DrawPoly(p, 4, 7 * S, 45, wc);
         DrawPoly(p, 4, 4 * S, 45, Color{30, 20, 40, 255});
         ui::Draw(w.name, p.x + 9 * S, p.y - 16 * S, 13 * S, wc, true);
@@ -282,9 +376,17 @@ void NavMap::Draw(const Aircraft& a, const Autopilot& ap, Vector3 wind, const st
     ui::Draw(L("Ready approaches:", "Готовые заходы:"), px, area.y + 40 * S, 13 * S, kDim);
     const Vector2 m = GetMousePosition();
     float by = area.y;
-    for (const Btn& b : Buttons(area)) {
+    const int sel = sel_ < (int)ap.route.size() ? sel_ : -1;
+    const std::vector<Btn> btns = Buttons(area, sel >= 0);
+    for (const Btn& b : btns) {
+        if (b.id == 10) {   // подпись редактора выбранной точки
+            const Waypoint& w = ap.route[sel];
+            std::string altS = w.altFt > 0 ? std::string(TextFormat("%d ft", (int)w.altFt)) : std::string(L("no altitude", "без высоты"));
+            ui::Draw(TextFormat(L("Point %d %s: %s", "Точка %d %s: %s"), sel + 1, w.name, altS.c_str()), b.r.x, b.r.y - 26 * S, 16 * S,
+                     Color{255, 230, 90, 255}, true);
+        }
         bool hot = CheckCollisionPointRec(m, b.r);
-        bool on = b.id == 2 && ap.navOn;
+        bool on = (b.id == 2 && ap.navOn) || (b.id == 3 && ap.vnavOn);
         DrawRectangleRec(b.r, on ? Color{30, 90, 50, 255} : (hot ? Color{60, 66, 80, 255} : Color{36, 40, 50, 255}));
         DrawRectangleLinesEx(b.r, 1.0f, Color{90, 96, 108, 255});
         ui::DrawCentered(b.label.c_str(), b.r.x + b.r.width * 0.5f, b.r.y + b.r.height * 0.5f - 8 * S, 14 * S, WHITE);
@@ -293,11 +395,13 @@ void NavMap::Draw(const Aircraft& a, const Autopilot& ap, Vector3 wind, const st
     float y = by + 18 * S;
     float gs = sqrtf(a.vel.x * a.vel.x + a.vel.z * a.vel.z);
     if (ap.route.empty()) {
+        rowRects_.clear();
         ui::Draw(L("Route is empty", "Маршрут пуст"), px, y, 15 * S, kDim);
         y += 24 * S;
     } else {
         float total = 0;
         Vector3 prev = a.pos;
+        rowRects_.clear();
         for (int i = 0; i < (int)ap.route.size() && y < area.y + area.height - 150 * S; ++i) {
             const Waypoint& w = ap.route[i];
             bool done = i < ap.activeWp;
@@ -308,6 +412,8 @@ void NavMap::Draw(const Aircraft& a, const Autopilot& ap, Vector3 wind, const st
                 prev = w.pos;
             }
             Color c = done ? Color{120, 120, 120, 255} : (i == ap.activeWp ? WHITE : kMagenta);
+            rowRects_.push_back({px - 4 * S, y - 2 * S, pw + 8 * S, 21 * S});
+            if (i == sel) DrawRectangleRec(rowRects_.back(), Color{255, 230, 90, 40});
             ui::Draw(TextFormat("%s%d %s", i == ap.activeWp ? "> " : "  ", i + 1, w.name), px, y, 15 * S, c, i == ap.activeWp);
             if (!done) ui::DrawRight(TextFormat("%.1f NM", total / 1852.0f), px + pw * 0.72f, y, 14 * S, c);
             if (w.altFt > 0) ui::DrawRight(TextFormat("%d", (int)w.altFt), px + pw, y, 14 * S, c);
@@ -324,11 +430,15 @@ void NavMap::Draw(const Aircraft& a, const Autopilot& ap, Vector3 wind, const st
     ui::Draw(ap.navOn ? L("NAV: autopilot follows the route", "NAV: автопилот ведёт по маршруту")
                       : L("NAV off: F2 to fly the route", "NAV выключен: F2 — лететь по маршруту"),
              px, y + 6 * S, 14 * S, ap.navOn ? Color{80, 230, 120, 255} : Color{230, 170, 40, 255});
-    const char* help[] = {L("LMB - add waypoint (on airport - snaps)", "ЛКМ — точка маршрута (у аэродрома — на него)"),
-                          L("RMB - remove last   Del - clear", "ПКМ — убрать последнюю   Del — очистить"),
+    ui::Draw(ap.vnavOn ? L("VNAV: altitudes of the points are flown", "VNAV: высоты точек выдерживаются")
+                       : L("VNAV off: altitude from the AP selector (-/=)", "VNAV выключен: высота — задатчик автопилота (-/=)"),
+             px, y + 26 * S, 14 * S, ap.vnavOn ? Color{80, 230, 120, 255} : Color{170, 176, 186, 255});
+    const char* help[] = {L("LMB - new point / pick a point and drag it", "ЛКМ — новая точка / взять точку и перетащить"),
+                          L("-/= altitude of the point (Shift x1000)", "-/= — высота выбранной точки (с Shift — по 1000)"),
+                          L("RMB on a point / Del - delete, Shift+Del - all", "ПКМ по точке / Del — удалить, Shift+Del — всё"),
                           L("Wheel - zoom   N / Esc - close", "Колесо — масштаб   N / Esc — закрыть"),
-                          L("T - AP, F2 - NAV, L - ILS at the end", "T — автопилот, F2 — NAV, L — ILS в конце")};
-    float hy = area.y + area.height - 4 * 19 * S;
+                          L("T - AP, F2 - NAV, F3 - VNAV, L - ILS", "T — автопилот, F2 — NAV, F3 — VNAV, L — ILS")};
+    float hy = area.y + area.height - 5 * 19 * S;
     for (const char* h : help) {
         ui::Draw(h, px, hy, 13 * S, kDim);
         hy += 19 * S;
