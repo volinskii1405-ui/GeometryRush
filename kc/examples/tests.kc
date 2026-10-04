@@ -1,0 +1,88 @@
+// tests.kc — самопроверка компилятора: печатает "ok N" или "FAIL N", код возврата = число провалов
+int fails = 0;
+int gnum = -42;
+int gmsg = "global";
+int gtab[4] = {10, 20, 30};
+int gzero[3];
+int names[] = {"zero", "one", "two"};
+
+void check(int n, int cond) {
+    if (cond) { print("ok "); } else { print("FAIL "); fails++; }
+    print_int(n);
+    putchar('\n');
+}
+
+int idx_calls = 0;
+int idx() { idx_calls++; return 1; }
+
+int sum(int a, int len) {
+    int s = 0;
+    for (int i = 0; i < len; i++) s += a[i];
+    return s;
+}
+
+int main() {
+    // 1-4: постфиксный/префиксный ++ --
+    int i = 5;
+    int x = i++;
+    check(1, x == 5 && i == 6);
+    x = ++i;
+    check(2, x == 7 && i == 7);
+    x = i--;
+    check(3, x == 7 && i == 6);
+    x = --i;
+    check(4, x == 5 && i == 5);
+
+    // 5-6: тернарный оператор (правоассоциативный)
+    check(5, (i > 3 ? 100 : 200) == 100);
+    int sign = i < 0 ? -1 : i == 0 ? 0 : 1;
+    check(6, sign == 1);
+
+    // 7-9: локальные массивы
+    int a[5];
+    check(7, a[0] == 0 && a[4] == 0);
+    for (int k = 0; k < 5; k++) a[k] = k * k;
+    check(8, sum(a, 5) == 30);
+    int b[] = {1, 2, 3};
+    int c[4] = {7};
+    check(9, b[2] == 3 && c[0] == 7 && c[3] == 0);
+
+    // 10: составное присваивание вычисляет адрес один раз
+    a[idx()] += 10;
+    check(10, idx_calls == 1 && a[1] == 11);
+
+    // 11: do-while выполняется хотя бы раз
+    int n = 0;
+    do { n++; } while (n < 0);
+    check(11, n == 1);
+
+    // 12-14: глобальные константы, строки, массивы
+    check(12, gnum == -42 && strcmp(gmsg, "global") == 0);
+    check(13, gtab[1] == 20 && gtab[3] == 0 && gzero[2] == 0);
+    gtab[3] = 40;
+    check(14, sum(gtab, 4) == 100 && strcmp(names[2], "two") == 0);
+
+    // 15-16: escape-последовательности, новые функции stdlib
+    check(15, load8("\x41") == 'A' && '\e' == 27);
+    int buf = alloc(16);
+    memset(buf, 'z', 3);
+    memcpy(buf + 3, "!!", 3);
+    check(16, strcmp(buf, "zzz!!") == 0 && abs(-7) == 7);
+    free(buf, 16);
+
+    // 17: объявление нескольких переменных и указатели на элементы массива
+    int p = &a[2], q = 3;
+    *p = q;
+    check(17, a[2] == 3 && *(p + 8) == 9);
+
+    // 18: break/continue
+    int t = 0;
+    for (int k = 0; ; k++) {
+        if (k % 2) continue;
+        if (k > 8) break;
+        t += k;
+    }
+    check(18, t == 20);
+
+    return fails;
+}
